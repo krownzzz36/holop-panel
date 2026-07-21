@@ -199,6 +199,8 @@ def parse_shield_seconds(profile_text):
 
 # маркеры исхода боя (словарь classify_result из holop_raid неполон — уточняем локально)
 ABSORB_WORDS = ("частокол", "поглотил", "выдержал", "заряд")   # защита поглотила удар — НЕ проигрыш, HP цел
+# донатная физическая защита (Железный Купол / Стена) — жрёт требушеты, бить бессмысленно
+DONATE_RE = re.compile(r"железн\w*\s+купол|требушет\w*\s+остал", re.IGNORECASE)
 LOSS_WORDS = ("отступ", "героическая оборона", "вынуждены", "поражение", "разбит",
               "отброшен", "не смогл", "провалил", "неудач", "отбит", "устоял")
 WIN_WORDS = ("вотчина пала", "растоптан", "молниеносн", "победу", "празднова",
@@ -299,6 +301,7 @@ class Smasher:
         self.s = s
         self.control_path = os.path.join(HERE, s["control_file"])
         self.bench_path = os.path.join(HERE, "smash_bench.txt")     # снятые с ротации после поражения
+        self.donate_path = os.path.join(HERE, "smash_donate.txt")   # цели с донат-защитой (Купол/Стена) — не бьём
         self.targets_path = os.path.join(HERE, "smash_targets.txt")  # редактируемый список целей
         self.settings_path = os.path.join(HERE, "smash_settings.json")  # живые настройки из панели
         self.apply_live_settings()   # подхватить настройки из панели на старте
@@ -492,6 +495,30 @@ class Smasher:
                 f.write(name + "\n")
         except OSError as e:
             log(f"  (не смог записать скамейку: {e})")
+
+    # ---------- ДОНАТ-ЗАЩИТЫ (файл smash_donate.txt) — Купол/Стена, не бьём ----------
+    def load_donate(self):
+        """Множество norm(ник) целей с донат-защитой (жрут требушеты). Постоянный список."""
+        out = set()
+        try:
+            with open(self.donate_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    n = line.split("#", 1)[0].strip()
+                    if n:
+                        out.add(norm(n))
+        except OSError:
+            pass
+        return out
+
+    def donate_add(self, name):
+        """Занести цель в список донат-защит навсегда (пока сам не уберёшь из файла)."""
+        if norm(name) in self.load_donate():
+            return
+        try:
+            with open(self.donate_path, "a", encoding="utf-8") as f:
+                f.write(name + "\n")
+        except OSError as e:
+            log(f"  (не смог записать донат-список: {e})")
 
     # ---------- ПУЛЬТ (файл smash_control.txt) ----------
     def control_state(self):
@@ -719,6 +746,8 @@ class Smasher:
             except Exception:
                 pass
             return "noresult", 0, None
+        if DONATE_RE.search(result):
+            return "donate", 0, parse_result_my_hp(result)   # Купол/Стена — жрёт требушеты
         outcome, loot = classify_result(result)
         outcome = refine_outcome(result, outcome)
         self.stats["rep"] += parse_rep(result)   # 📈 репутация с этого боя (если есть)
@@ -771,6 +800,14 @@ class Smasher:
                 self.bench_add(name)
                 log(f"  ❌ {name}: ПОРАЖЕНИЕ в бою — СНЯЛ С РОТАЦИИ до твоего распоряжения "
                     f"(чтобы не сливать HP). Скажи «верни {name}», чтобы вернуть.")
+                return my_after
+            # ДОНАТ-ЗАЩИТА (Железный Купол/Стена) — жрёт требушеты, снимаем НАВСЕГДА
+            if outcome == "donate":
+                self.stats["hits"] += 1
+                self.donate_add(name)
+                self.next_ok[name] = time.time() + 10 ** 9   # не вернётся в этой сессии
+                log(f"  🛡️ {name}: ДОНАТНАЯ защита (Купол/Стена) — требушеты не трачу, "
+                    f"снял навсегда. Вернуть: убери ник из {os.path.basename(self.donate_path)}")
                 return my_after
             cd = s["attack_cd"] + random.uniform(s["jitter_lo"], s["jitter_hi"])
             self.next_ok[name] = self._spread(time.time() + cd, name)
@@ -1270,9 +1307,10 @@ class Smasher:
 
         self.targets = self.load_targets()   # подхватываем правки списка из панели на лету
         benched = self.load_benched()
-        active = [t for t in self.targets if norm(t) not in benched]
+        donated = self.load_donate()          # цели с донат-Куполом/Стеной — не бьём (требушеты)
+        active = [t for t in self.targets if norm(t) not in benched and norm(t) not in donated]
         if not active:
-            log("🪑 Все цели на скамейке / список пуст — жду распоряжения (верни кого-то или добавь цель)")
+            log("🪑 Все цели на скамейке/донате / список пуст — жду распоряжения (верни кого-то или добавь цель)")
             return await self.sleep_gated(60)
 
         now = time.time()

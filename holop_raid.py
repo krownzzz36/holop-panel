@@ -137,6 +137,21 @@ def norm(s):
     return re.sub(r"[^0-9a-zа-яё]+", "", s)
 
 
+def _load_donate_skip():
+    """Ники с донат-защитой (Купол/Стена) из smash_donate.txt — их не берём в набег."""
+    import os
+    out = set()
+    try:
+        with open(os.path.join(HERE, "smash_donate.txt"), encoding="utf-8") as f:
+            for line in f:
+                n = line.split("#", 1)[0].strip()
+                if n:
+                    out.add(norm(n))
+    except OSError:
+        pass
+    return out
+
+
 def parse_pages(text):
     m = re.search(UI["page_re"], text or "")
     return (int(m.group(1)), int(m.group(2))) if m else (1, 1)
@@ -523,11 +538,15 @@ class Raider:
         my_hp = parse_my_hp(ar.message or "")
         log(f"⚔️ Моя атака: {self.my_attack}, ❤️ HP: {my_hp}/100. "
             f"Порог: защита × {self.margin:g}. Нужно целей: ~{self.want}")
+        donated = _load_donate_skip()   # цели с донат-Куполом/Стеной — в список не берём
         hit = []
         for t in rich:
             if len(hit) >= self.want:
                 log(f"   (набрали {self.want} целей — хватит пробивать)")
                 break
+            if norm(t["name"]) in donated:
+                log(f"   🛡️ {t['name']}: донат-защита (Купол/Стена) — пропуск, требушеты не тратим")
+                continue
             res = await self.arena_search(ar, t["name"])
             if not res:
                 log(f"   ⁇ {t['name']}: поиск не дал экрана — пропуск")
