@@ -201,6 +201,16 @@ def parse_shield_seconds(profile_text):
 ABSORB_WORDS = ("частокол", "поглотил", "выдержал", "заряд")   # защита поглотила удар — НЕ проигрыш, HP цел
 # донатная физическая защита (Железный Купол / Стена) — жрёт требушеты, бить бессмысленно
 DONATE_RE = re.compile(r"железн\w*\s+купол|требушет\w*\s+остал", re.IGNORECASE)
+
+
+def _is_dead_session(e):
+    """Сессия убита Telegram (ключ отозван / используется в двух местах) — retry бесполезен."""
+    n = type(e).__name__.lower()
+    s = str(e).lower()
+    return ("authkeyduplicated" in n or "authkeyunregistered" in n
+            or "sessionrevoked" in n or "sessionexpired" in n
+            or "userdeactivated" in n or "authorization key" in s
+            or "two different ip" in s)
 LOSS_WORDS = ("отступ", "героическая оборона", "вынуждены", "поражение", "разбит",
               "отброшен", "не смогл", "провалил", "неудач", "отбит", "устоял")
 WIN_WORDS = ("вотчина пала", "растоптан", "молниеносн", "победу", "празднова",
@@ -1254,6 +1264,12 @@ class Smasher:
                 if await self._one_cycle() == "stop":
                     break
             except Exception as e:
+                if _is_dead_session(e):
+                    log("🛑 СЕССИЯ БОЛЬШЕ НЕ РАБОТАЕТ — ключ отозван Telegram. "
+                        "Причина почти всегда одна: бот запущен ДВАЖДЫ с одной сессией "
+                        "(два окна). Останавливаюсь. Оставь ОДНО окно, закрой лишние. "
+                        "Если панель просит войти заново — авторизуйся, это нормально.")
+                    break
                 log(f"  ⚠️ сбой в цикле: {type(e).__name__}: {e} — продолжаю через 15с")
                 try:
                     if not self.c.is_connected():
@@ -1273,6 +1289,8 @@ class Smasher:
             if await self.check_and_handle_bomb():
                 return None
         except Exception as e:
+            if _is_dead_session(e):
+                raise   # мёртвую сессию обрабатывает главный цикл (остановка)
             log(f"  ⚠️ сбой в проверке бочки: {type(e).__name__}: {e}")
         # РЕЖИМ ЛЕЧЕНИЯ: не атакуем, но КАЖДЫЙ РАЗ читаем реальное HP (Территория).
         # Просыпаемся сразу, как только HP дорос до recover_to (в т.ч. после эликсира).

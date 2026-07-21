@@ -28,7 +28,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSION = "2026.07.21-7"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
+VERSION = "2026.07.21-8"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
 PY = sys.executable or "python3"
 PORT = int(os.environ.get("HOLOP_PORT", "8777"))
 
@@ -571,6 +571,45 @@ def oneshot_stop(mid):
     return {"ok": True}
 
 
+BOT_SCRIPTS = sorted({m["script"] for m in MODULES if m.get("script")})
+
+
+def _win_sweep_orphans():
+    """Windows: убить осиротевшие боты (python-процессы наших скриптов),
+    что пережили закрытие cmd. Бьём ТОЛЬКО по командной строке — чужое не заденем."""
+    if not IS_WIN:
+        return
+    likes = " -or ".join(f"$_.CommandLine -like '*{s}*'" for s in BOT_SCRIPTS)
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name like 'py%'\" | "
+          f"Where-Object {{ {likes} }} | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=0x08000000, timeout=15)
+    except Exception:
+        pass
+
+
+def stop_all():
+    """СТОП-КРАН: погасить ВСЁ — набеги, разовые модули, ночной режим, осиротевшие боты."""
+    write_control("stop")
+    if night_running():
+        stop_night()
+    for m in MODULES:
+        _terminate(read_pid(m["id"]))
+    if IS_WIN:
+        _win_sweep_orphans()
+    else:
+        for s in BOT_SCRIPTS:
+            try:
+                subprocess.run(["pkill", "-f", s],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+    return {"ok": True}
+
+
 # ─────────────── статус-доска (КД/щиты из лога набегов) ───────────────
 STATE_PATTERNS = [
     (re.compile(r"ПОБЕДА"), "🏆 победа"),
@@ -684,6 +723,9 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             body = {}
         parts = p.strip("/").split("/")   # ['api', mid, action]
+        # ── стоп-кран: погасить всё ──
+        if p == "/api/stop_all":
+            return self._json(stop_all())
         # ── вход в аккаунт ──
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "auth":
             try:
@@ -766,7 +808,8 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  th{color:var(--mut);font-weight:600;font-size:12px}
  .summ{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px}
 </style></head><body>
-<header><h1>🏰 Холоп — Пульт <span style="color:#8a8f98;font-size:11px;font-weight:400">v__VERSION__</span></h1><div id="tabs"></div></header>
+<header><h1>🏰 Холоп — Пульт <span style="color:#8a8f98;font-size:11px;font-weight:400">v__VERSION__</span></h1><div id="tabs"></div>
+<button class="b-red" style="margin-left:auto" onclick="stopAll()" title="Остановить ВСЕ боты разом">🛑 Стоп-кран</button></header>
 <main id="main"></main>
 <script>
 const $=s=>document.querySelector(s);
@@ -888,6 +931,11 @@ async function pollStatus(){
   }catch(e){}
 }
 async function post(mid,action){ try{await fetch('/api/'+mid+'/'+action,{method:'POST'});}catch(e){} pollMod(); }
+async function stopAll(){
+  if(!confirm('Остановить ВСЕ боты (набеги, пещеры, всё)? Пульт останется открыт.')) return;
+  try{ await fetch('/api/stop_all',{method:'POST'}); }catch(e){}
+  pollMod();
+}
 async function runOne(mid,action){
   const m=CFG.find(x=>x.id===mid); const fields={};
   (m.fields||[]).forEach(f=>fields[f.id]=$('#f_'+f.id).value);
@@ -1039,7 +1087,11 @@ def main():
         print(f"Пульт уже запущен: {url}")
         webbrowser.open(url)
         return
-    print(f"🏰 Пульт Холопа v{VERSION}: {url}\n(Окно можно свернуть/закрыть — на ботов не влияет.)")
+    if IS_WIN:
+        _win_sweep_orphans()   # чистим осиротевшие боты от прошлого закрытого окна (чтоб не было двух)
+    tail_note = ("Это окно — сервер пульта. Закроешь окно — всё остановится."
+                 if IS_WIN else "Окно можно свернуть/закрыть — на ботов не влияет.")
+    print(f"🏰 Пульт Холопа v{VERSION}: {url}\n({tail_note})")
     if not os.environ.get("HOLOP_NO_BROWSER"):
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
