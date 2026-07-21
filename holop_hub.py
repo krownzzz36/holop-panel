@@ -28,6 +28,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+VERSION = "2026.07.21-3"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
 PY = sys.executable or "python3"
 PORT = int(os.environ.get("HOLOP_PORT", "8777"))
 
@@ -598,6 +599,7 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?", 1)[0]
         if p == "/" or p.startswith("/index"):
             page = PAGE if is_authorized() else LOGIN_PAGE
+            page = page.replace("__VERSION__", VERSION)
             self._send(200, page, "text/html; charset=utf-8")
         elif p == "/api/auth/status":
             self._json({"authorized": is_authorized()})
@@ -706,7 +708,7 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
  th{color:var(--mut);font-weight:600;font-size:12px}
  .summ{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px}
 </style></head><body>
-<header><h1>🏰 Холоп — Пульт</h1><div id="tabs"></div></header>
+<header><h1>🏰 Холоп — Пульт <span style="color:#8a8f98;font-size:11px;font-weight:400">v__VERSION__</span></h1><div id="tabs"></div></header>
 <main id="main"></main>
 <script>
 const $=s=>document.querySelector(s);
@@ -836,7 +838,8 @@ LOGIN_PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 </style></head><body>
 <div class="box">
   <h1>🏰 Вход в Холоп</h1>
-  <p class="sub">Войди своим Telegram — пульт будет работать на твоём аккаунте.</p>
+  <p class="sub">Войди своим Telegram — пульт будет работать на твоём аккаунте.
+    <span style="color:#8a8f98">v__VERSION__</span></p>
 
   <div id="step-phone">
     <label>Номер телефона (как в Telegram)</label>
@@ -915,7 +918,7 @@ def main():
         print(f"Пульт уже запущен: {url}")
         webbrowser.open(url)
         return
-    print(f"🏰 Пульт Холопа: {url}\n(Окно можно свернуть/закрыть — на ботов не влияет.)")
+    print(f"🏰 Пульт Холопа v{VERSION}: {url}\n(Окно можно свернуть/закрыть — на ботов не влияет.)")
     if not os.environ.get("HOLOP_NO_BROWSER"):
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
