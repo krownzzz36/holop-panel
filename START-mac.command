@@ -9,6 +9,8 @@ if [ -z "$PY" ]; then
   read -p "Enter для выхода… " _; exit 1
 fi
 "$PY" -c "import telethon" 2>/dev/null || "$PY" -m pip install --user telethon
+# автообновление из GitHub (вход и списки не трогает)
+"$PY" "$DIR/update.py"
 HOLOP_NO_BROWSER=1 nohup "$PY" "$DIR/holop_hub.py" >/dev/null 2>&1 &
 sleep 1.5
 open "http://127.0.0.1:8777/"

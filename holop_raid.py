@@ -296,6 +296,8 @@ class Raider:
         self.min_hp = args.min_hp
         self.max_rounds = args.max_rounds
         self.buy_oboz = not args.no_oboz
+        self.skip_defended = getattr(args, "skip_defended", False)  # пропускать ров/частокол/защиты
+        self.max_def = int(getattr(args, "max_def", 0) or 0)        # макс. защита цели (0 = любая)
         self.lo = float(cfg.get("min_delay", 0.8))
         self.hi = float(cfg.get("max_delay", 1.8))
         self.my_attack = None
@@ -306,10 +308,25 @@ class Raider:
         await asyncio.sleep(random.uniform(self.lo, self.hi))
 
     async def recent(self, limit=12):
-        return await self.c.get_messages(self.bot, limit=limit)
+        # @holop шлёт анимации, которые телетон не парсит → get_messages падает на всём окне.
+        # Пробуем окна поменьше (битое сообщение часто не самое свежее); не валимся.
+        for lim in (limit, 6, 3, 1):
+            if lim > limit:
+                continue
+            try:
+                return await self.c.get_messages(self.bot, limit=lim) or []
+            except Exception as e:
+                if type(e).__name__ != "TypeNotFoundError":
+                    raise
+        return []
 
     async def refetch(self, msg_id):
-        return await self.c.get_messages(self.bot, ids=msg_id)
+        try:
+            return await self.c.get_messages(self.bot, ids=msg_id)
+        except Exception as e:
+            if type(e).__name__ == "TypeNotFoundError":
+                return None
+            raise
 
     async def _flood(self, coro):
         while True:
@@ -330,6 +347,18 @@ class Raider:
                 for col, b in enumerate(row):
                     out.append((r, col, (b.text or "")))
         return out
+
+    def target_button_datas(self, msg: Message):
+        """callback-данные ведущих кнопок целей (в том же порядке, что target_buttons).
+        В данных зашита защита: pvp_attack_<id>_def_chastokol / _def_rov / … → «_def_» = есть физзащита."""
+        datas = []
+        if msg and msg.buttons:
+            for row in msg.buttons:
+                for b in row:
+                    if _is_control_btn(b.text or ""):
+                        return datas
+                    datas.append(getattr(b, "data", None))
+        return datas
 
     async def wait_for(self, contains, min_id=0, tries=15, delay=0.5):
         """Дождаться свежего сообщения бота, содержащего contains (шум отсекаем)."""
@@ -554,12 +583,23 @@ class Raider:
             ar = res
             blocks = parse_arena_targets(res.message or "")
             tbtns = target_buttons(self.flat_buttons(res))
+            tdatas = self.target_button_datas(res)
             idx = exact_target(blocks, t["name"])
             # СТРОГО: нужна цель с точным совпадением имени И кнопка на той же позиции
             if idx is None or idx >= len(tbtns):
                 log(f"   ⁇ {t['name']}: нет точного совпадения на арене — пропуск (не рискуем)")
                 continue
             b = blocks[idx]
+            # 🧱 ров/частокол/физзащита — зашита в callback-данных кнопки атаки («_def_»)
+            data = tdatas[idx] if idx < len(tdatas) else None
+            if self.skip_defended and data and b"_def_" in data:
+                dtype = data.split(b"_def_")[-1].decode("ascii", "ignore")
+                log(f"   🧱 {t['name']}: защита «{dtype or 'ров/частокол'}» — пропуск (не долбимся)")
+                continue
+            # 🎯 фильтр по максимальной защите (для боя за 1 HP)
+            if self.max_def and b["defense"] and b["defense"] > self.max_def:
+                log(f"   — {t['name']}: защ.{b['defense']} > {self.max_def} — пропуск")
+                continue
             attackable = button_attackable(tbtns[idx])
             ok_atk = self.beatable(b["defense"])
             ok_lvl = (b["level"] or 0) >= self.min_level
@@ -763,6 +803,10 @@ async def main():
     ap.add_argument("--duration", type=int, default=50, help="минут крутить набеги (деф. 50)")
     ap.add_argument("--max-rounds", type=int, default=0, help="лимит кругов (0=без лимита)")
     ap.add_argument("--kd", type=int, default=300, help="КД на цель, секунд (деф. 300)")
+    ap.add_argument("--skip-defended", action="store_true",
+                    help="пропускать цели с ров/частокол/физзащитой (по данным кнопки)")
+    ap.add_argument("--max-def", type=int, default=0,
+                    help="брать только цели с защитой ≤ N (0 = без ограничения; напр. 500 для боя за 1 HP)")
     ap.add_argument("--no-oboz", action="store_true", help="не покупать обоз (только с --attack)")
     ap.add_argument("--attack", action="store_true",
                     help="ВКЛючить авто-набеги (по умолчанию — только список ников)")

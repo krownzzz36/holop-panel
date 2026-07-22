@@ -57,6 +57,10 @@ if errorlevel 1 (
 echo [ok] telethon >> "%LOG%"
 echo   Telegram library is ready.
 
+rem ---------- 2b. auto-update from GitHub (keeps your login/lists) ----------
+echo   Checking for updates...
+%PYCMD% update.py
+
 rem ---------- 3. run the panel ----------
 echo(
 echo   --------------------------------------------

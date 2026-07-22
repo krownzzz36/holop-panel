@@ -71,9 +71,7 @@ from holop_raid import (
 # ════════════════════════════════════════════════════════════════════════════
 #  ЦЕЛИ И НАСТРОЙКИ ПО УМОЛЧАНИЮ (правится тут или в config.json → "smash")
 # ════════════════════════════════════════════════════════════════════════════
-# Пусто по умолчанию: свежая установка НИ ПО КОМУ не бьёт, пока ты сам
-# не впишешь ников в панели (вкладка «Набеги» → «Цели» → «Сохранить список»).
-TARGETS = []
+TARGETS = []  # пусто: свежая установка не бьёт никого, пока не впишешь
 
 DEFAULTS = {
     "attack_cd": 300,            # базовый КД на цель, секунд (5 минут)
@@ -87,6 +85,7 @@ DEFAULTS = {
     "shield_default_retry": 30,  # мин, если таймер щита не распарсился
     "weak_retry": 30,           # мин, если цель «Слаб» и HP прочитать не удалось
     "notfound_retry": 10,       # мин, если цель не нашлась / нет точного совпадения
+    "defended_retry": 30,       # мин, на сколько отложить цель с ров/частокол, если «не пробивать»
     "clan_level_retry": 120,    # мин для «свой клан» / «ниже ур.» (само не изменится)
     "inter_hit_lo": 4,          # пауза между разными целями (низ), сек
     "inter_hit_hi": 10,         # пауза между разными целями (верх), сек
@@ -95,7 +94,10 @@ DEFAULTS = {
     "heal_recheck": 180,        # базовый интервал перечитывания HP в лечении, сек (было 90 — с запасом)
     "heal_recheck_jitter": 40,  # ± случайные секунды к интервалу перечитывания HP
     # ── защита от бочки (динамита) ──
-    "bomb_check_interval": 75,  # как часто опрашивать «Дружина» на бочку, сек
+    # 0 = НЕ опрашивать «Дружину» по таймеру (не палиться): ловим бочку по пушу
+    #     «скоро взорвётся» + один чек при старте. >0 = ещё и опрос раз в N сек (для ночи).
+    "bomb_poll_interval": 0,
+    "bomb_check_interval": 75,  # (устар.) старый таймер опроса — не используется при poll=0
     "bomb_fuse": "красн",       # какой фитиль резать (подстрока, регистр не важен)
     "ognivo_cost": 900,         # цена Огнива, золото
     "heal_cost": 100000,        # лечение территории после взрыва, серебро
@@ -211,6 +213,38 @@ def _is_dead_session(e):
             or "sessionrevoked" in n or "sessionexpired" in n
             or "userdeactivated" in n or "authorization key" in s
             or "two different ip" in s)
+
+
+def parse_shop_gold(text):
+    """Золото с экрана Магазина: «🏅 1663 золота» → 1663. None если не нашли."""
+    m = re.search(r"🏅\s*([\d\s]+?)\s*золот", text or "")
+    if m:
+        try:
+            return int(m.group(1).replace(" ", ""))
+        except ValueError:
+            return None
+    return None
+
+
+# предметы обороны: держим активными + запас (покупка за золото 🏅, не за ⭐)
+DEFENSE_ITEMS = [
+    {"name": "Частокол", "price": 350, "reserve": 2},   # блок 3 набегов / 24ч
+    {"name": "Ров", "price": 100, "reserve": 2},          # блок 1 набег
+]
+
+
+def parse_regen_bonus(text):
+    """Суммарный бонус регена HP (%) с экрана «Территория». База = 1 HP/мин.
+    Складываем: «Регенерация: +50%», «Сердце: +50%», «+21% реген» (герои), «+6% реген» (клан)."""
+    t = text or ""
+    total = 0.0
+    for m in re.finditer(r"Регенерац\w*[:\s]*\+?(\d+)\s*%", t):
+        total += float(m.group(1))
+    for m in re.finditer(r"Сердце[:\s]*\+?(\d+)\s*%", t):
+        total += float(m.group(1))
+    for m in re.finditer(r"\+?(\d+)\s*%\s*реген", t):
+        total += float(m.group(1))
+    return total
 LOSS_WORDS = ("отступ", "героическая оборона", "вынуждены", "поражение", "разбит",
               "отброшен", "не смогл", "провалил", "неудач", "отбит", "устоял")
 WIN_WORDS = ("вотчина пала", "растоптан", "молниеносн", "победу", "празднова",
@@ -258,6 +292,33 @@ def parse_rep(text):
     """Заработанная репутация из итога боя: «📈 +2.0 репутации» → 2.0 (0.0 если нет)."""
     m = re.search(r"([+\-]?\d+(?:[.,]\d+)?)\s*репутаци", text or "")
     return float(m.group(1).replace(",", ".")) if m else 0.0
+
+
+def parse_rep_penalty(text):
+    """Списание репутации за атаку. Возвращает ОТРИЦАТЕЛЬНОЕ число ТОЛЬКО если игра
+    явно сняла репутацию — то есть рядом со словом «репутаци» стоит число с минусом
+    («-5 репутации», «Репутация: -5», «репутация −3»). Плюсовая или нулевая репутация
+    штрафом НЕ считается (её как раз копим) → 0.0.
+
+    Никаких «ключевых слов без числа»: в тексте победы всегда есть «❤️ Потери в бою: N»,
+    и на подстроку «потер» ловились обычные победы (Миру мир, лплудвж). Бенчим строго
+    по минусу у самой репутации."""
+    t = text or ""
+    low = t.lower()
+    if "репутаци" not in low:
+        return 0.0
+    for m in re.finditer(r"репутаци\w*", low):
+        # число ВПЛОТНУЮ перед словом: «-5 репутации», «📈 +1 репутация»
+        before = low[max(0, m.start() - 12): m.start()]
+        mb = re.search(r"([+\-−])\s*(\d+(?:[.,]\d+)?)\s*$", before)
+        if mb and mb.group(1) in "-−":
+            return -float(mb.group(2).replace(",", "."))
+        # число ВПЛОТНУЮ после слова: «Репутация: -8», «репутация −3»
+        after = low[m.end(): m.end() + 12]
+        ma = re.search(r"^\W{0,4}([+\-−])\s*(\d+(?:[.,]\d+)?)", after)
+        if ma and ma.group(1) in "-−":
+            return -float(ma.group(2).replace(",", "."))
+    return 0.0
 
 
 CD_BTN_RE = re.compile(r"•\s*\d+\s*(?:ч|мин|м|сек|с)")   # «Имя • 2м 53с» — персональный КД
@@ -329,7 +390,19 @@ class Smasher:
         self.peer = None   # кэш entity бота (резолвим один раз)
         self._healing = False    # режим лечения: не атакуем, перечитываем реальное HP
         self._heal_start = 0.0   # когда ушли на лечение (для аварийного потолка)
+        self._last_raw = ""            # сырой текст последнего ответа набега
+        self._last_rep_penalty = 0.0   # < 0, если за последнюю атаку списали репутацию
         self._last_bomb_check = 0.0   # когда последний раз опрашивали «Дружину» на бочку
+        self._regen_auto = False      # авто-реген: считать сек/HP по бонусам с главной
+        self._auto_kazna = False      # авто-казна: собирать доход + депозит + реинвест
+        self._last_bank = 0.0         # когда последний раз собирали казну
+        self._next_bank = 0.0         # когда следующий раз по таймеру (раз в ~час)
+        self._auto_defense = False    # авто-оборона: ров+частокол активны + запас
+        self._next_defense = 0.0      # когда следующий раз проверять оборону
+        self._last_hit_name = None    # последняя обработанная цель — продолжить список отсюда
+        self._pierce_defenses = True  # пробивать ров/частокол (True) или пропускать (False)
+        self._last_tl_warn = 0.0      # троттл лога про нераспознанные анимации @holop
+        self._bomb_alert_until = 0.0  # до этого времени — тревога бочки: долбим «Дружину» каждый цикл
         self.stats.update({"bombs": 0, "defused": 0, "exploded": 0,
                            "spent_gold": 0, "spent_silver": 0})
 
@@ -355,14 +428,25 @@ class Smasher:
                 data = json.load(f)
         except (OSError, ValueError):
             return
-        ints = {"my_min_hp", "my_recover_to"}
+        ints = {"my_min_hp", "my_recover_to", "bomb_poll_interval"}
         for k in ("my_min_hp", "my_recover_to", "min_per_hp",
-                  "attack_cd", "jitter_lo", "jitter_hi"):
+                  "attack_cd", "jitter_lo", "jitter_hi", "bomb_poll_interval"):
             if k in data:
                 try:
                     self.s[k] = int(data[k]) if k in ints else float(data[k])
                 except (TypeError, ValueError):
                     pass
+        # реген: ползунок «сек на 1 HP» → min_per_hp (мин на 1 HP). Если авто — не перетираем.
+        self._regen_auto = bool(data.get("regen_auto", getattr(self, "_regen_auto", False)))
+        if not self._regen_auto and "sec_per_hp" in data:
+            try:
+                self.s["min_per_hp"] = max(1, int(data["sec_per_hp"])) / 60.0
+            except (TypeError, ValueError):
+                pass
+        # флаги авто-казны и авто-обороны
+        self._auto_kazna = bool(data.get("auto_kazna", getattr(self, "_auto_kazna", False)))
+        self._auto_defense = bool(data.get("auto_defense", getattr(self, "_auto_defense", False)))
+        self._pierce_defenses = bool(data.get("pierce_defenses", getattr(self, "_pierce_defenses", True)))
 
     def ensure_targets_file(self):
         """Если файла целей нет — создать с текущим списком (чтобы панель могла его показать)."""
@@ -376,8 +460,7 @@ class Smasher:
 
     # ---------- низкоуровневые помощники ----------
     def _spread(self, t_target, name, gap=8.0):
-        """Развести время атак: чтобы удары по разным целям не приходились на один момент.
-        Пока новое время ближе gap секунд к чьему-то — добавляем ещё случайные секунды."""
+        """Развести время атак: чтобы удары по разным целям не приходились на один момент."""
         s = self.s
         others = [v for k, v in self.next_ok.items() if k != name]
         guard = 0
@@ -423,16 +506,24 @@ class Smasher:
         raise last or ConnectionError("сеть недоступна после ретраев")
 
     async def recent(self, limit=8):
-        # @holop иногда шлёт сообщения с TL-объектом, который старый Telethon не парсит
-        # (спец-анимации боя) → get_messages падает TypeNotFoundError. Не валимся: вернём
-        # пустое, вызвавший подождёт/повторит (битое сообщение вытеснится новыми).
-        try:
-            return await self._net(lambda: self.c.get_messages(self.peer, limit=limit)) or []
-        except Exception as e:
-            if type(e).__name__ == "TypeNotFoundError":
-                log("  🧩 нераспознанный TL-объект в ленте — пропускаю это чтение")
-                return []
-            raise
+        # @holop шлёт анимации с TL-объектом, который телетон не парсит → get_messages
+        # падает TypeNotFoundError на ВСЁМ окне. Обходим: пробуем окна поменьше (битое
+        # сообщение часто не самое свежее — меньший лимит его исключит и чтение пройдёт).
+        # Лог про это — не чаще раза в 45с, чтобы не спамить.
+        for lim in (limit, 4, 2, 1):
+            if lim > limit:
+                continue
+            try:
+                return await self._net(lambda l=lim: self.c.get_messages(self.peer, limit=l)) or []
+            except Exception as e:
+                if type(e).__name__ != "TypeNotFoundError":
+                    raise
+        now = time.time()
+        if now - self._last_tl_warn > 45:
+            log("  🧩 @holop прислал анимацию, которую телетон не читает — пропускаю "
+                "(это норма, спам подавлен)")
+            self._last_tl_warn = now
+        return []
 
     async def refetch(self, msg_id):
         try:
@@ -452,6 +543,18 @@ class Smasher:
                 for col, b in enumerate(row):
                     out.append((r, col, (b.text or "")))
         return out
+
+    def target_button_datas(self, msg: Message):
+        """callback-данные ведущих кнопок целей (в порядке target_positions).
+        В данных зашита защита: pvp_attack_<id>_def_chastokol / _def_rov → «_def_» = ров/частокол."""
+        datas = []
+        if msg and msg.buttons:
+            for row in msg.buttons:
+                for b in row:
+                    if _is_control_btn(b.text or ""):
+                        return datas
+                    datas.append(getattr(b, "data", None))
+        return datas
 
     async def click(self, msg: Message, r, col, *, label=""):
         if self.dry:
@@ -596,6 +699,154 @@ class Smasher:
                     return parse_my_low_hp(t)
             await asyncio.sleep(0.5)
         return None
+
+    async def open_territory(self):
+        """Открыть «Территория» и вернуть сообщение (со статами и кнопкой «Собрать»). None если не смог."""
+        await self.send("Территория")
+        for _ in range(12):
+            for m in sorted(await self.recent(6), key=lambda x: x.id, reverse=True):
+                if m.out:
+                    continue
+                if "ТЕРРИТОРИЯ" in (m.message or ""):
+                    return m
+            await asyncio.sleep(0.5)
+        return None
+
+    async def update_regen_from_main(self):
+        """Авто-реген: посчитать сек/HP по бонусам с главной и записать в min_per_hp."""
+        if not self._regen_auto:
+            return
+        terr = await self.open_territory()
+        if not terr:
+            return
+        bonus = parse_regen_bonus(terr.message or "")
+        sec = 60.0 / (1.0 + bonus / 100.0) if bonus > 0 else 60.0
+        self.s["min_per_hp"] = sec / 60.0
+        log(f"🔄 Авто-реген с главной: бонусы +{bonus:.0f}% реген → ~{sec:.0f} сек/HP")
+
+    # ---------- АВТО-КАЗНА (доход → депозит → реинвест) ----------
+    async def collect_and_bank(self):
+        """Собрать доход (Территория+Холопы) → положить всё в казну → реинвест (серебро+золото)."""
+        log("🏦 Авто-казна: собираю доход и несу в казну…")
+        terr = await self.open_territory()
+        if terr:
+            await self.click_text(terr, "Собрать", label="Собрать доход (серебро)")
+            await asyncio.sleep(1.0)
+        await self.send("Холопы")
+        hol = await self.wait_text("Холопы")
+        if hol:
+            await self.click_text(hol, "Собрать", label="Собрать золото")
+            await asyncio.sleep(1.0)
+        await self._bank_currency("Серебро")
+        await self._bank_currency("Золото")
+        self._last_bank = time.time()
+        self._next_bank = time.time() + 3600 + random.uniform(-600, 600)   # раз в ~час ± 10 мин
+        log("🏦 Авто-казна: готово.")
+
+    async def _bank_currency(self, kind):
+        """Положить всё в депозит валюты и реинвестировать. kind: 'Серебро' / 'Золото'."""
+        await self.send("Личная казна")
+        kazna = await self.wait_text("Личная казна")
+        if not kazna:
+            log(f"  ⚠️ казна не открылась ({kind})")
+            return
+        if not await self.click_text(kazna, kind, label=f"Казна: {kind}"):
+            log(f"  ⚠️ нет кнопки «{kind}» в казне")
+            return
+        dep = await self.wait_text("ДЕПОЗИТ")
+        if not dep:
+            log(f"  ⚠️ экран депозита ({kind}) не открылся")
+            return
+        if await self.click_text(dep, "Депозит", label=f"Депозит {kind}"):
+            sub = await self.wait_text("умму для внесения")   # «Выберите сумму для внесения»
+            if sub:
+                if not await self.click_text(sub, "Положить всё", label="Положить всё"):
+                    await self.click_text(sub, "Назад", label="Назад")
+                await asyncio.sleep(1.0)
+        dep2 = await self.wait_text("ДЕПОЗИТ")
+        if dep2:
+            await self.click_text(dep2, "Реинвест", label=f"Реинвест {kind}")
+            await asyncio.sleep(0.8)
+
+    # ---------- АВТО-ОБОРОНА (ров + частокол: держать активными + запас) ----------
+    async def _collect_holop_gold(self):
+        """Собрать золото с холопов (когда не хватает на оборону)."""
+        await self.send("Холопы")
+        hol = await self.wait_text("Холопы")
+        if hol:
+            await self.click_text(hol, "Собрать", label="Собрать золото")
+            await asyncio.sleep(1.0)
+
+    async def _reopen_defense(self):
+        """Магазин → Средства обороны, вернуть сообщение экрана обороны."""
+        await self.send("Магазин")
+        shop = await self.wait_text("Магазин")
+        if not shop:
+            return None
+        await self.click_text(shop, "Средства обороны", label="Средства обороны")
+        return await self.wait_text("Средства обороны")
+
+    def _defense_state(self, dmsg, name):
+        """(active, stock, activate_btn, buy_btn) для предмета обороны по имени."""
+        active, stock, act_btn, buy_btn = False, 0, None, None
+        for r, c, t in self.flat_buttons(dmsg):
+            if name.lower() not in (t or "").lower():
+                continue
+            if "⏱" in (t or ""):
+                active = True
+            m = re.search(r"x\s*(\d+)", t or "")
+            if m:
+                stock = int(m.group(1))
+                act_btn = (r, c)                                  # кнопка запаса = активировать
+            elif "🏅" in (t or "") and STAR not in (t or ""):
+                buy_btn = (r, c)                                  # цена в золоте = купить
+        return active, stock, act_btn, buy_btn
+
+    async def _ensure_one_defense(self, dmsg, item):
+        """Докупить запас до reserve и активировать, если не активен. Вернуть свежий dmsg."""
+        name, reserve = item["name"], item["reserve"]
+        active, stock, act_btn, buy_btn = self._defense_state(dmsg, name)
+        tried_collect, guard = False, 0
+        while stock < reserve and buy_btn and guard < 6:
+            prev = stock
+            await self.click(dmsg, buy_btn[0], buy_btn[1], label=f"Купить {name}")
+            await asyncio.sleep(0.9)
+            dmsg = await self.wait_text("Средства обороны") or dmsg
+            active, stock, act_btn, buy_btn = self._defense_state(dmsg, name)
+            guard += 1
+            if stock <= prev and not self.dry:      # не купилось → скорее всего не хватило золота
+                if not tried_collect:
+                    log(f"  💰 {name}: не купилось — собираю золото с холопов")
+                    await self._collect_holop_gold()
+                    tried_collect = True
+                    dmsg = await self._reopen_defense() or dmsg
+                    active, stock, act_btn, buy_btn = self._defense_state(dmsg, name)
+                    continue
+                log(f"  💰 {name}: золота не хватает — пропускаю докупку")
+                break
+        if not active and act_btn and stock > 0:
+            await self.click(dmsg, act_btn[0], act_btn[1], label=f"Активировать {name}")
+            await asyncio.sleep(0.8)
+            dmsg = await self.wait_text("Средства обороны") or dmsg
+            log(f"  🛡️ {name}: активирован (запас теперь ~{max(0, stock - 1)})")
+        elif active:
+            log(f"  ✅ {name}: уже активен, запас {stock}")
+        elif not act_btn:
+            log(f"  ⚠️ {name}: нет запаса и не смог купить")
+        return dmsg
+
+    async def ensure_defenses(self):
+        """Держать ров и частокол активными + запас. Нет золота — снять с холопов."""
+        log("🛡️ Авто-оборона: проверяю ров/частокол…")
+        dmsg = await self._reopen_defense()
+        if not dmsg:
+            log("  ⚠️ не открыл «Средства обороны»")
+            self._next_defense = time.time() + 1200
+            return
+        for item in DEFENSE_ITEMS:
+            dmsg = await self._ensure_one_defense(dmsg, item) or dmsg
+        self._next_defense = time.time() + 1200 + random.uniform(-300, 300)   # раз в ~20 мин ± 5
+        log("🛡️ Авто-оборона: готово.")
 
     async def press_search(self):
         """Нажать «Поиск» на самом свежем сообщении, где эта кнопка есть; иначе открыть арену."""
@@ -761,6 +1012,8 @@ class Smasher:
         outcome, loot = classify_result(result)
         outcome = refine_outcome(result, outcome)
         self.stats["rep"] += parse_rep(result)   # 📈 репутация с этого боя (если есть)
+        self._last_raw = result
+        self._last_rep_penalty = parse_rep_penalty(result)   # < 0 → штраф репутации за атаку
         if outcome == "unknown" and landed:
             outcome = "blocked"   # удар прошёл (кнопка в КД), но текст не разобрали — частокол/ров
         elif outcome == "unknown":
@@ -787,6 +1040,16 @@ class Smasher:
         btn = positions[idx][2]
 
         if button_attackable(btn):
+            # 🧱 ров/частокол видно в данных кнопки атаки («_def_»). Если «не пробивать» — пропускаем.
+            if not self._pierce_defenses:
+                datas = self.target_button_datas(res)
+                data = datas[idx] if idx < len(datas) else None
+                if data and b"_def_" in data:
+                    dtype = data.split(b"_def_")[-1].decode("ascii", "ignore")
+                    self.next_ok[name] = time.time() + s["defended_retry"] * 60
+                    log(f"  🧱 {name}: {dtype or 'ров/частокол'} — пропускаю "
+                        f"(«пробивать» выкл), ретрай через {s['defended_retry']}м")
+                    return
             hp = b.get("hp")
             if hp is not None and hp <= s["tgt_min_hp"]:
                 goal = s["tgt_min_hp"] + 1        # бить можно уже с 20+ HP — ждём только до этого
@@ -818,6 +1081,15 @@ class Smasher:
                 self.next_ok[name] = time.time() + 10 ** 9   # не вернётся в этой сессии
                 log(f"  🛡️ {name}: ДОНАТНАЯ защита (Купол/Стена) — требушеты не трачу, "
                     f"снял навсегда. Вернуть: убери ник из {os.path.basename(self.donate_path)}")
+                return my_after
+            # РЕПУТАЦИЯ СПИСАНА за атаку (слабый/низкий соперник) — на скамейку, чтобы не терять реп
+            if self._last_rep_penalty < 0:
+                self.stats["hits"] += 1
+                self.bench_add(name)
+                self.next_ok[name] = time.time() + s["clan_level_retry"] * 60
+                raw = " ".join((self._last_raw or "").split())[:200]
+                log(f"  📉 {name}: игра СПИСАЛА репутацию ({self._last_rep_penalty:+.0f}) за атаку — "
+                    f"СНЯЛ НА СКАМЕЙКУ (верни: «верни {name}»). Сырой ответ: {raw}")
                 return my_after
             cd = s["attack_cd"] + random.uniform(s["jitter_lo"], s["jitter_hi"])
             self.next_ok[name] = self._spread(time.time() + cd, name)
@@ -875,16 +1147,35 @@ class Smasher:
 
     # ═══════════ ЗАЩИТА ОТ БОЧКИ (динамита) ═══════════
     async def open_druzhina(self):
-        """Открыть экран «Дружина» (там разминирование). Ищем по кнопке с «Огниво»."""
+        """Открыть экран «Дружина». Вернуть сообщение (заминировано → с кнопкой «Огниво»,
+        иначе обычный экран дружины/оружия). None — только если прочитать НЕ удалось."""
         await self.send("Дружина")
         for _ in range(14):
-            for m in sorted(await self.recent(6), key=lambda x: x.id, reverse=True):
+            for m in sorted(await self.recent(8), key=lambda x: x.id, reverse=True):
                 if m.out:
                     continue
-                if any("огниво" in (bt or "").lower() for _, _, bt in self.flat_buttons(m)):
+                t = (m.message or "")
+                has_ognivo = any("огниво" in (bt or "").lower() for _, _, bt in self.flat_buttons(m))
+                if has_ognivo or MINED_MARKER in t or "ДРУЖИН" in t.upper() or "оружие" in t.lower():
                     return m
             await asyncio.sleep(0.5)
         return None
+
+    def _is_mined(self, dr):
+        """Заминирована ли территория по экрану «Дружина» (текст ЗАМИНИРОВАНА или кнопка Огниво)."""
+        if not dr:
+            return False
+        return (MINED_MARKER in (dr.message or "")
+                or any("огниво" in (bt or "").lower() for _, _, bt in self.flat_buttons(dr)))
+
+    def _bomb_log(self, text):
+        """Отдельный чистый журнал инцидентов с бочкой — не теряется в шуме набегов."""
+        log(text)   # дублируем и в основной лог
+        try:
+            with open(os.path.join(HERE, "bomb_events.log"), "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  " + text + "\n")
+        except OSError:
+            pass
 
     async def my_balance(self):
         """Свободные (на балансе) золото и серебро с экрана «Территория» → (gold, silver)."""
@@ -961,24 +1252,46 @@ class Smasher:
         _, sv2 = await self.my_balance()
         return sv2 >= need
 
-    async def check_and_handle_bomb(self):
-        """Вернуть True, если бочка найдена и обработана (тогда обычный цикл пропускаем)."""
+    async def check_and_handle_bomb(self, force=False):
+        """Вернуть True, если бочка найдена и обработана (тогда обычный цикл пропускаем).
+
+        НЕ палимся: по умолчанию «Дружину» НЕ опрашиваем по таймеру — ловим бочку
+        по входящему пушу «скоро взорвётся». Один принудительный чек при старте (force),
+        и опрос по таймеру только если bomb_poll_interval > 0 (для ночного режима)."""
         now = time.time()
         push = False
         try:
-            for m in await self.recent(6):
-                if not m.out and BOMB_WARN in (m.message or ""):
+            for m in await self.recent(15):   # шире окно: при частых набегах пуш быстро уходит вниз
+                if m.out:
+                    continue
+                t = m.message or ""
+                if BOMB_WARN in t or MINED_MARKER in t:
                     push = True
                     break
         except Exception:
             pass
-        if not push and (now - self._last_bomb_check < self.s["bomb_check_interval"]):
-            return False
+        if push and now >= self._bomb_alert_until:
+            self._bomb_log("💣💣💣 ВИЖУ БОЧКУ (пуш «скоро взорвётся»)! Иду разминировать — бросаю набеги.")
+        if push:
+            self._bomb_alert_until = now + 150   # тревога ~2.5 мин: долбим «Дружину», пока не разминируем
+        alert = now < self._bomb_alert_until
+        poll = int(self.s.get("bomb_poll_interval", 0) or 0)
+        due = poll > 0 and (now - self._last_bomb_check >= poll)
+        if not force and not push and not alert and not due:
+            return False   # обычный режим: пока нет пуша — «Дружину» не дёргаем (не палимся)
         self._last_bomb_check = now
         dr = await self.open_druzhina()
-        if not dr or MINED_MARKER not in (dr.message or ""):
+        if not dr:
+            if alert:
+                self._bomb_log("  ⚠️ БОЧКА: не смог прочитать «Дружину» (сбой чтения) — повторю в след. цикле!")
             return False
-        await self.handle_bomb(dr)
+        if not self._is_mined(dr):
+            if alert:
+                self._bomb_log("  ✅ БОЧКА: мины на «Дружине» нет — уже разминирована или взорвалась.")
+                self._bomb_alert_until = 0.0
+            return False
+        await self.handle_bomb(dr)          # разминирование (логирует «💣💣💣 БОЧКА!»)
+        self._bomb_alert_until = 0.0        # разминировали — тревога снята
         return True
 
     async def handle_bomb(self, dr):
@@ -986,20 +1299,20 @@ class Smasher:
         who = re.search(r"Атаковал:\s*([^\n]+)", txt)
         secs = parse_mine_seconds(txt)
         self.stats["bombs"] += 1
-        log("💣💣💣 БОЧКА! Заминировал: {} | осталось {} — РАЗМИНИРОВАНИЕ".format(
+        self._bomb_log("💣💣💣 БОЧКА! Заминировал: {} | осталось {} — РАЗМИНИРОВАНИЕ".format(
             who.group(1).strip() if who else "?", fmt_secs(secs) if secs else "?"))
         sp = {"gold": 0, "silver": 0}
         if not await self.ensure_ognivo(sp):
-            log("  ⛔ нечем разминировать (Огниво/золото) — бочка может взорваться!")
+            self._bomb_log("  ⛔ нечем разминировать (Огниво/золото) — бочка может взорваться!")
             return
         outcome = await self.use_ognivo_red()
         if outcome == "defused":
             self.stats["defused"] += 1
-            log("  ✅ БОЧКА ОБЕЗВРЕЖЕНА — территория цела.")
+            self._bomb_log("  ✅ БОЧКА ОБЕЗВРЕЖЕНА — территория цела.")
             return
         if outcome == "exploded":
             self.stats["exploded"] += 1
-            log("  💥 ВЗРЫВ (фитиль не тот) — восстанавливаю территорию и холопов.")
+            self._bomb_log("  💥 ВЗРЫВ (фитиль не тот) — восстанавливаю территорию и холопов.")
             await self.recover_after_explosion(sp)
             return
         log(f"  ⁇ разминирование: непонятный исход «{outcome}» — проверь лог сырых экранов выше")
@@ -1257,6 +1570,31 @@ class Smasher:
             on_bench = [t for t in self.targets if norm(t) in benched]
             log(f"🪑 На скамейке (после поражений, не бью): {', '.join(on_bench) or '—'} "
                 f"— вернуть: убрать из {os.path.basename(self.bench_path)}")
+        poll0 = int(self.s.get("bomb_poll_interval", 0) or 0)
+        log("💣 Анти-бочка: " + ("опрос «Дружины» раз в %dс + чек при старте" % poll0 if poll0 > 0
+            else "по пушу «скоро взорвётся» — «Дружину» НЕ открываю, пока нет бочки"))
+        if poll0 > 0:
+            try:
+                await self.check_and_handle_bomb(force=True)   # старт-чек только в режиме опроса (ночь)
+            except Exception as e:
+                if _is_dead_session(e):
+                    raise
+                log(f"  ⚠️ стартовый чек бочки не удался: {type(e).__name__}: {e}")
+        if self._regen_auto:
+            try:
+                await self.update_regen_from_main()
+            except Exception as e:
+                if _is_dead_session(e):
+                    raise
+                log(f"  ⚠️ авто-реген не удался: {type(e).__name__}: {e}")
+        self._last_bank = time.time()
+        self._next_bank = time.time() + 3600 + random.uniform(-600, 600)
+        self._next_defense = time.time() + 60 + random.uniform(0, 120)   # первую оборону — скоро
+        if self._auto_kazna:
+            log(f"🏦 Авто-казна ВКЛ — первый сбор примерно через {(self._next_bank-time.time())/60:.0f} мин, "
+                "плюс при уходе на лечение.")
+        if self._auto_defense:
+            log("🛡️ Авто-оборона ВКЛ — держу ров/частокол активными + запас.")
         while True:
             if await self.gate() == "stop":
                 break
@@ -1267,8 +1605,7 @@ class Smasher:
                 if _is_dead_session(e):
                     log("🛑 СЕССИЯ БОЛЬШЕ НЕ РАБОТАЕТ — ключ отозван Telegram. "
                         "Причина почти всегда одна: бот запущен ДВАЖДЫ с одной сессией "
-                        "(два окна). Останавливаюсь. Оставь ОДНО окно, закрой лишние. "
-                        "Если панель просит войти заново — авторизуйся, это нормально.")
+                        "(два окна/процесса). Останавливаюсь. Оставь ОДНО, закрой лишнее.")
                     break
                 log(f"  ⚠️ сбой в цикле: {type(e).__name__}: {e} — продолжаю через 15с")
                 try:
@@ -1292,6 +1629,26 @@ class Smasher:
             if _is_dead_session(e):
                 raise   # мёртвую сессию обрабатывает главный цикл (остановка)
             log(f"  ⚠️ сбой в проверке бочки: {type(e).__name__}: {e}")
+        # 🏦 АВТО-КАЗНА по таймеру (раз в ~час ± рандом)
+        if self._auto_kazna and self._next_bank and time.time() >= self._next_bank:
+            try:
+                await self.collect_and_bank()
+            except Exception as e:
+                if _is_dead_session(e):
+                    raise
+                log(f"  ⚠️ авто-казна (таймер) сбой: {type(e).__name__}: {e}")
+                self._next_bank = time.time() + 1800   # повтор через 30 мин при сбое
+            return None
+        # 🛡️ АВТО-ОБОРОНА по таймеру (ров/частокол активны + запас)
+        if self._auto_defense and self._next_defense and time.time() >= self._next_defense:
+            try:
+                await self.ensure_defenses()
+            except Exception as e:
+                if _is_dead_session(e):
+                    raise
+                log(f"  ⚠️ авто-оборона сбой: {type(e).__name__}: {e}")
+                self._next_defense = time.time() + 900   # повтор через 15 мин при сбое
+            return None
         # РЕЖИМ ЛЕЧЕНИЯ: не атакуем, но КАЖДЫЙ РАЗ читаем реальное HP (Территория).
         # Просыпаемся сразу, как только HP дорос до recover_to (в т.ч. после эликсира).
         if self._healing:
@@ -1306,7 +1663,8 @@ class Smasher:
             else:
                 rem = max(1.0, (s["my_recover_to"] - (hp or 0)) * s["min_per_hp"])
                 shown = str(hp) if hp is not None else "?"
-                nap = heal_recheck_secs(s)
+                # спим ДО почти-цели (реже читаем HP — не палимся). Не чаще 1/мин, не реже 1/15мин.
+                nap = max(60.0, min(rem * 60.0 * 0.9 + random.uniform(-15, 15), 900.0))
                 log(f"🩶 Лечусь: HP {shown}, до {s['my_recover_to']} ~{rem:.0f}м — перечитаю через {nap:.0f}с")
                 return await self.sleep_gated(nap)
         arena = await self.open_arena()
@@ -1319,8 +1677,15 @@ class Smasher:
         if my_hp is not None and my_hp <= s["my_min_hp"]:
             self._healing = True
             self._heal_start = time.time()
-            log(f"🩸 Мои HP {my_hp} ≤ {s['my_min_hp']} — ухожу на лечение до {s['my_recover_to']} "
-                f"(буду перечитывать HP ~каждые {s['heal_recheck']}с).")
+            log(f"🩸 Мои HP {my_hp} ≤ {s['my_min_hp']} — ухожу на лечение до {s['my_recover_to']}.")
+            # 🏦 раз уж не бьём и регенимся — заодно собираем казну (но не чаще раза в 10 мин)
+            if self._auto_kazna and time.time() - self._last_bank >= 600:
+                try:
+                    await self.collect_and_bank()
+                except Exception as e:
+                    if _is_dead_session(e):
+                        raise
+                    log(f"  ⚠️ авто-казна (лечение) сбой: {type(e).__name__}: {e}")
             return None
 
         self.targets = self.load_targets()   # подхватываем правки списка из панели на лету
@@ -1330,6 +1695,7 @@ class Smasher:
         if not active:
             log("🪑 Все цели на скамейке/донате / список пуст — жду распоряжения (верни кого-то или добавь цель)")
             return await self.sleep_gated(60)
+        active = self._rotate_after_last(active)   # продолжаем с места остановки, а не сначала
 
         now = time.time()
         eligible = [t for t in active if self.next_ok.get(t, 0.0) <= now]
@@ -1345,11 +1711,22 @@ class Smasher:
             if self.control_state() != "run":
                 return None   # пульт переключили — уходим на gate() в начале цикла
             my_after = await self.do_target(t)
+            self._last_hit_name = t          # запомнили позицию — после лечения продолжим отсюда
             if isinstance(my_after, int) and my_after <= s["my_min_hp"]:
-                log(f"🩸 После удара мои HP {my_after} ≤ {s['my_min_hp']} — прерываю проход на лечение")
+                log(f"🩸 После удара мои HP {my_after} ≤ {s['my_min_hp']} — прерываю проход на лечение "
+                    f"(продолжу список после «{t}»)")
                 return None
             await self.inter_hit()
         return None
+
+    def _rotate_after_last(self, ordered):
+        """Начать список с цели ПОСЛЕ последней обработанной — продолжить, а не сначала.
+        Так после лечения бот доходит список с места остановки, потом идёт по кругу."""
+        last = self._last_hit_name
+        if not last or last not in ordered:
+            return ordered
+        i = ordered.index(last)
+        return ordered[i + 1:] + ordered[:i + 1]
 
     # ---------- разовая разведка (ничего не бьёт) ----------
     async def selftest(self):
@@ -1448,5 +1825,28 @@ async def main():
         await client.disconnect()
 
 
+def _write_crash(exc):
+    """Пишет полную ошибку смашера в hub_error.log — чтобы её можно было прислать."""
+    import traceback
+    import platform
+    try:
+        with open(os.path.join(HERE, "hub_error.log"), "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 64 + "\n")
+            f.write("ВЫЛЕТ НАБЕГОВ (holop_smash)  " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+            f.write("Python: " + sys.version.replace("\n", " ") + "\n")
+            f.write("OS: " + platform.platform() + "\n")
+            f.write("-" * 64 + "\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write("=" * 64 + "\n")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        log(f"🛑 Набеги упали: {type(e).__name__}: {e} — записал в hub_error.log")
+        _write_crash(e)

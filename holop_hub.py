@@ -769,44 +769,79 @@ PAGE = r"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🏰 Холоп — Пульт</title>
 <style>
- :root{--bg:#16171d;--panel:#1e2028;--ink:#e8e8ea;--mut:#8a8f98;--green:#2ecc71;--red:#e74c3c;
-       --blue:#3b82f6;--line:#2a2d36;--card:#0f1015;}
+ :root{color-scheme:light dark;--radius:14px;--radius-sm:10px;
+   --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,Helvetica,Arial,sans-serif;
+   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+   --bg:#0a0a0c;--bg2:#141416;--card:#1c1c1e;--elev:#2c2c2e;
+   --ink:#f5f5f7;--mut:#9a9aa2;--faint:#6a6a72;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.055);
+   --blue:#0a84ff;--green:#30d158;--red:#ff453a;--grey:#48484a;--purple:#bf5af2;
+   --glass:rgba(18,18,20,.72);--shadow:0 10px 34px rgba(0,0,0,.46),0 1px 0 rgba(255,255,255,.04) inset;}
+ @media (prefers-color-scheme:light){:root{
+   --bg:#f2f2f7;--bg2:#e9e9ef;--card:#fff;--elev:#fff;--ink:#1d1d1f;--mut:#6e6e73;--faint:#8e8e93;
+   --line:rgba(0,0,0,.10);--line2:rgba(0,0,0,.055);--blue:#007aff;--green:#34c759;--red:#ff3b30;--grey:#e6e6eb;
+   --glass:rgba(255,255,255,.72);--shadow:0 10px 34px rgba(0,0,0,.09),0 0 0 .5px rgba(0,0,0,.045);}}
  *{box-sizing:border-box}
- body{margin:0;background:var(--bg);color:var(--ink);
-      font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
- header{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line);
-        background:var(--panel);flex-wrap:wrap}
- h1{font-size:16px;margin:0 12px 0 0;font-weight:800;white-space:nowrap}
- .tab{padding:7px 13px;border-radius:9px;cursor:pointer;color:var(--mut);font-weight:600;font-size:14px;
-      border:1px solid transparent}
- .tab:hover{color:var(--ink)}
- .tab.on{background:var(--card);color:var(--ink);border-color:var(--line)}
- main{padding:14px 16px}
- .desc{color:var(--mut);font-size:13px;margin:0 0 12px}
- .row{display:flex;gap:14px;align-items:stretch}
+ html{-webkit-text-size-adjust:100%}
+ body{margin:0;min-height:100vh;color:var(--ink);letter-spacing:-.011em;
+   font:15px/1.5 var(--font);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+   background:radial-gradient(1100px 560px at 82% -12%,color-mix(in srgb,var(--blue) 11%,transparent),transparent 62%),var(--bg)}
+ header{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:10px;padding:11px 18px;flex-wrap:wrap;
+   background:var(--glass);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);
+   border-bottom:.5px solid var(--line)}
+ h1{font-size:16px;margin:0 6px 0 0;font-weight:680;letter-spacing:-.022em;white-space:nowrap;
+   display:flex;align-items:center;gap:7px}
+ #tabs{display:flex;gap:3px;padding:3px;border-radius:12px;flex-wrap:wrap;
+   background:color-mix(in srgb,var(--card) 66%,transparent);border:.5px solid var(--line2)}
+ .tab{padding:6px 12px;border-radius:9px;cursor:pointer;color:var(--mut);font-weight:590;font-size:13.5px;
+   letter-spacing:-.01em;white-space:nowrap;user-select:none;transition:color .2s,background .28s,box-shadow .28s,transform .1s}
+ .tab:hover{color:var(--ink)} .tab:active{transform:scale(.955)}
+ .tab.on{background:var(--elev);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.28),0 0 0 .5px var(--line)}
+ main{padding:18px;max-width:1440px;margin:0 auto}
+ .desc{color:var(--mut);font-size:13px;margin:2px 0 16px}
+ .row{display:flex;gap:16px;align-items:stretch}
  .col-log{flex:1;min-width:0;display:flex;flex-direction:column}
- .side{width:270px;display:flex;flex-direction:column;gap:8px}
- label{display:block;color:var(--mut);font-size:12px;margin:4px 0 3px}
- input,select,textarea{width:100%;background:var(--card);color:var(--ink);border:1px solid var(--line);
-      border-radius:8px;padding:8px;font:14px inherit}
- textarea{font:13px/1.5 Menlo,monospace;resize:vertical}
- button{font:600 14px inherit;border:0;border-radius:9px;padding:9px 14px;cursor:pointer;color:#fff}
- button:hover{filter:brightness(1.1)} button:active{filter:brightness(.9)}
- .b-green{background:var(--green)} .b-red{background:var(--red)} .b-blue{background:var(--blue)}
- .b-grey{background:#3a3f4a} .b-night{background:#3a3f4b;width:100%} .b-night.on{background:#6d5ae6}
- .pill{padding:4px 10px;border-radius:999px;font-weight:700;font-size:12px;margin-left:auto}
- .pill.run{background:rgba(46,204,113,.16);color:var(--green)}
- .pill.pause{background:rgba(255,255,255,.08);color:var(--mut)}
- .pill.stopped,.pill.idle{background:rgba(231,76,60,.14);color:var(--red)}
- pre.log{flex:1;min-height:340px;max-height:64vh;overflow:auto;background:var(--card);border:1px solid var(--line);
-      border-radius:10px;padding:11px;margin:0;white-space:pre-wrap;word-break:break-word;
-      font:12.5px/1.5 Menlo,monospace;color:#d7d7db}
- .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+ .side{width:300px;display:flex;flex-direction:column;gap:9px}
+ label{display:block;color:var(--mut);font-size:12px;font-weight:510;margin:9px 0 4px}
+ input,select,textarea{width:100%;background:var(--card);color:var(--ink);border:.5px solid var(--line);
+   border-radius:var(--radius-sm);padding:10px 11px;font:14px var(--font);outline:none;
+   transition:border-color .18s,box-shadow .18s;-webkit-appearance:none;appearance:none}
+ input:focus,select:focus,textarea:focus{border-color:var(--blue);
+   box-shadow:0 0 0 3.5px color-mix(in srgb,var(--blue) 22%,transparent)}
+ input[type=checkbox]{width:18px;height:18px;accent-color:var(--blue);vertical-align:-3px}
+ textarea{font:13px/1.55 var(--mono);resize:vertical}
+ button{font:590 14px var(--font);letter-spacing:-.01em;border:0;border-radius:var(--radius-sm);
+   padding:10px 15px;cursor:pointer;color:#fff;box-shadow:0 1px 2px rgba(0,0,0,.18);
+   transition:transform .09s ease,filter .15s,box-shadow .2s}
+ button:hover{filter:brightness(1.08)} button:active{transform:scale(.97);filter:brightness(.93)}
+ .b-green{background:linear-gradient(180deg,color-mix(in srgb,var(--green) 90%,#fff),var(--green))}
+ .b-red{background:linear-gradient(180deg,color-mix(in srgb,var(--red) 90%,#fff),var(--red))}
+ .b-blue{background:linear-gradient(180deg,color-mix(in srgb,var(--blue) 90%,#fff),var(--blue))}
+ .b-grey{background:var(--elev);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.14),0 0 0 .5px var(--line)}
+ .b-night{background:var(--elev);color:var(--ink);width:100%;box-shadow:0 1px 2px rgba(0,0,0,.14),0 0 0 .5px var(--line)}
+ .b-night.on{background:linear-gradient(180deg,#7d6cf0,#6d5ae6);color:#fff}
+ .pill{padding:4px 11px;border-radius:999px;font-weight:640;font-size:12px;margin-left:auto;
+   display:inline-flex;align-items:center;gap:6px}
+ .pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+ .pill.run{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+ .pill.pause{background:color-mix(in srgb,var(--mut) 18%,transparent);color:var(--mut)}
+ .pill.stopped,.pill.idle{background:color-mix(in srgb,var(--red) 15%,transparent);color:var(--red)}
+ pre.log{flex:1;min-height:360px;max-height:66vh;overflow:auto;background:var(--card);border:.5px solid var(--line);
+   border-radius:var(--radius);padding:14px 16px;margin:0;white-space:pre-wrap;word-break:break-word;
+   font:12.5px/1.62 var(--mono);color:var(--ink);box-shadow:var(--shadow)}
+ .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
  .note{color:var(--mut);font-size:12px;min-height:16px}
  table{width:100%;border-collapse:collapse;font-size:14px}
- td,th{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
- th{color:var(--mut);font-weight:600;font-size:12px}
- .summ{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px}
+ td,th{text-align:left;padding:9px 10px;border-bottom:.5px solid var(--line2)}
+ th{color:var(--mut);font-weight:590;font-size:12px}
+ .summ{background:var(--card);border:.5px solid var(--line);border-radius:var(--radius);
+   padding:12px 14px;margin-bottom:14px;font-size:13px;box-shadow:var(--shadow)}
+ ::-webkit-scrollbar{width:10px;height:10px}
+ ::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--mut) 38%,transparent);border-radius:99px;
+   border:3px solid transparent;background-clip:padding-box}
+ ::-webkit-scrollbar-track{background:transparent}
+ @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+ @media (prefers-reduced-transparency:reduce){header{background:var(--bg2);backdrop-filter:none;-webkit-backdrop-filter:none}}
+ @media (max-width:640px){.row{flex-direction:column}.side{width:auto}main{padding:12px}}
 </style></head><body>
 <header><h1>🏰 Холоп — Пульт <span style="color:#8a8f98;font-size:11px;font-weight:400">v__VERSION__</span></h1><div id="tabs"></div>
 <button class="b-red" style="margin-left:auto" onclick="stopAll()" title="Остановить ВСЕ боты разом">🛑 Стоп-кран</button></header>
