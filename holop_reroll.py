@@ -138,10 +138,26 @@ INVIS = dict.fromkeys(map(ord, "⁦⁧⁨⁩‎‏"), None)
 logger = logging.getLogger("holop")
 
 
+def _utf8_stream():
+    """Поток для консоли, который НЕ падает на эмодзи (Windows cp1251).
+    Оборачиваем буфер stdout в UTF-8 с errors='replace' — пуленепробиваемо даже
+    когда reconfigure недоступен (Py3.14, перенаправленный в файл вывод из хаба)."""
+    try:
+        import io
+        return io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                                errors="replace", line_buffering=True)
+    except Exception:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return sys.stdout
+
+
 def setup_logging():
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
-    sh = logging.StreamHandler(sys.stdout)
+    sh = logging.StreamHandler(_utf8_stream())   # эмодзи в консоли не роняют реролл
     sh.setFormatter(fmt)
     logger.addHandler(sh)
     fh = logging.FileHandler(os.path.join(HERE, "run.log"), encoding="utf-8")
@@ -753,11 +769,17 @@ class Reroller:
                 self.stats[nick]["guarded"] = guarded or await self.guard(nick)
                 return
 
-            # ⛔ под охраной выгонять НЕЛЬЗЯ — не вернём холопа.
+            # под охраной: по умолчанию НЕ трогаем (можно не вернуть холопа).
+            # С «Авто-разжабом» — выгоняем, а при возврате снимем охрану зельем жаб
+            # (capture → defrog_capture). Свежую охрану держит запас зелий.
             if guarded:
-                log(f"  ⛔ {nick} под охраной (🛡) — выгонять нельзя. Сними охрану и запусти снова. Стоп.")
-                self.stats[nick]["final"] = "под охраной — не трогаю"
-                return
+                if not self.auto_defrog:
+                    log(f"  ⛔ {nick} под охраной (🛡) — выгонять НЕ буду (можно потерять). "
+                        f"Включи «Авто-разжаб» — тогда выгоню и верну через зелье жаб. Стоп.")
+                    self.stats[nick]["final"] = "под охраной — не трогаю"
+                    return
+                log(f"  🐸 {nick} под охраной, но «Авто-разжаб» ВКЛ — выгоняю "
+                    f"(при возврате сниму охрану зельем из запаса)")
 
             # реролл: выгнать → захватить → профессию читаем С ЭКРАНА ЗАХВАТА
             self.stats[nick]["rerolls"] += 1
