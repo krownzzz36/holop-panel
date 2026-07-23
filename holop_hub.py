@@ -28,7 +28,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSION = "2026.07.23-2"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
+VERSION = "2026.07.23-3"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
 PY = sys.executable or "python3"
 PORT = int(os.environ.get("HOLOP_PORT", "8777"))
 
@@ -48,8 +48,22 @@ POPEN_KW["stdin"] = subprocess.DEVNULL
 POPEN_KW["env"] = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 
-def _pid_alive(pid):
-    """Жив ли процесс — БЕЗ его убийства (на Windows os.kill(pid,0) убивает процесс!)."""
+def _pid_cmd(pid):
+    """Командная строка процесса pid ('' если нет) — *nix. Чтобы отличить НАШ процесс
+    от чужого, которому ОС переиспользовала тот же pid (иначе os.kill(pid,0) врёт «жив»)."""
+    if not pid:
+        return ""
+    try:
+        r = subprocess.run(["ps", "-p", str(int(pid)), "-o", "command="],
+                           capture_output=True, text=True, timeout=3)
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _pid_alive(pid, needle=None):
+    """Жив ли процесс — БЕЗ его убийства (на Windows os.kill(pid,0) убивает процесс!).
+    needle (*nix) — проверить, что это ИМЕННО наш скрипт (защита от переиспользования pid)."""
     if not pid:
         return False
     if IS_WIN:
@@ -63,12 +77,14 @@ def _pid_alive(pid):
         code = ctypes.c_ulong()
         ok = k.GetExitCodeProcess(h, ctypes.byref(code))
         k.CloseHandle(h)
-        return bool(ok) and code.value == STILL_ACTIVE
+        return bool(ok) and code.value == STILL_ACTIVE   # (имя на Windows не проверяем — нет дешёвого способа)
     try:
         os.kill(int(pid), 0)
-        return True
     except OSError:
         return False
+    if needle is None:
+        return True
+    return needle in _pid_cmd(pid)   # pid жив, но НАШ ли это процесс?
 
 
 def _terminate(pid):
@@ -327,7 +343,9 @@ def _pgrep(pat):
 
 
 def is_running(mid):
-    alive = _pid_alive(read_pid(mid))
+    # проверяем pid С УЧЁТОМ имени скрипта (*nix) — защита от переиспользования pid другим процессом
+    script = MOD.get(mid, {}).get("script") if mid != "raids" else "holop_smash.py"
+    alive = _pid_alive(read_pid(mid), script)
     if mid == "raids":
         # набеги мог поднять и «Запустить» (smash.pid), и «Ночной режим» (night_smash.sh)
         return alive or _pgrep("holop_smash.py") or night_running()
@@ -344,7 +362,7 @@ def read_night_pid():
 
 
 def night_running():
-    return _pid_alive(read_night_pid()) or _pgrep("night_smash.sh")
+    return _pid_alive(read_night_pid(), "night_smash.sh") or _pgrep("night_smash.sh")
 
 
 def start_night():
