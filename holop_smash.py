@@ -1079,8 +1079,9 @@ class Smasher:
                 self.stats["hits"] += 1
                 self.donate_add(name)
                 self.next_ok[name] = time.time() + 10 ** 9   # не вернётся в этой сессии
-                log(f"  🛡️ {name}: ДОНАТНАЯ защита (Купол/Стена) — требушеты не трачу, "
-                    f"снял навсегда. Вернуть: убери ник из {os.path.basename(self.donate_path)}")
+                log(f"  🛡️ {name}: ДОНАТНАЯ защита (Купол/Стена) — снял НАВСЕГДА "
+                    f"(1 требушет ушёл на распознавание, дальше не трачу). "
+                    f"Вернуть: убери ник из {os.path.basename(self.donate_path)}")
                 return my_after
             # РЕПУТАЦИЯ СПИСАНА за атаку (слабый/низкий соперник) — на скамейку, чтобы не терять реп
             if self._last_rep_penalty < 0:

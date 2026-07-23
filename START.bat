@@ -3,6 +3,10 @@ rem ASCII-only launcher: no codepage/encoding surprises on any Windows.
 title Holop Panel
 cd /d "%~dp0"
 
+rem force UTF-8 for Python (fixes emoji crash on Russian Windows / cp1251)
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
 set "LOG=%~dp0startup_log.txt"
 echo === start %date% %time% === > "%LOG%"
 

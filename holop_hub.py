@@ -43,6 +43,9 @@ else:
 # stdin обязательно валидный (DEVNULL): без окна консоли Python иначе падает с
 # "Fatal Python error: init_sys_streams: can't initialize sys standard streams".
 POPEN_KW["stdin"] = subprocess.DEVNULL
+# ФОРСИРУЕМ UTF-8 у дочерних скриптов: на русской Windows (cp1251) Python иначе
+# падает/мусорит на эмодзи в логах. PYTHONUTF8=1 включает UTF-8-режим на любом Python.
+POPEN_KW["env"] = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 
 def _pid_alive(pid):
