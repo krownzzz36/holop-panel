@@ -89,6 +89,15 @@ UI = {
     "captured_marker":   "своим холопом",   # «✅ Ты сделал X своим холопом!» — захват удался
     "btn_guard_after":   "Защитить за 120", # охрана прямо на экране после захвата
 
+    # — РАЗЖАБ: снять охрану зельем жаб ИЗ ЗАПАСА (покупку за ⭐ НЕ жмём) —
+    # (проверено по скринам Ксюши 23.07.2026 — если игра сменит строки, правь ТУТ)
+    "defroggable":       ("охрана", "зелье жаб", "купи 🧪"),  # статусы, которые снимает зелье жаб
+    #   NB: «княжий щит» снимается 💣 (не зельем), «соклановец»/«кандал» — вообще никак
+    "potion_use_words":  ("зелье жаб", "разжаб", "снять охрану", "🐸"),  # кнопка «применить зелье»
+    "potion_buy_words":  ("купить",),       # покупка за ⭐ — НИКОГДА не жмём
+    "defrog_done":       ("Охрана", "снята", "Жабы разбежались", "разбежались"),  # «Охрана снята!»
+    "potion_stock_re":   r"есть:\s*(\d+)",  # запас зелий в тексте/кнопке: «есть: 60»
+
     # — ЗАПРЕЩЁННЫЕ маркеры (звёзды/платное — бот НИКОГДА не жмёт такие кнопки) —
     "star":              "⭐",
     "potion":            "🧪",              # «купи 🧪» = нужно зелье жаб (платно)
@@ -250,6 +259,8 @@ class Reroller:
         self.flo = float(cfg.get("fast_min_delay", 0.15))
         self.fhi = float(cfg.get("fast_max_delay", 0.4))
         self.allow_star = bool(cfg.get("allow_star_spend", False))
+        # авто-разжаб: снимать охрану зельем жаб ИЗ ЗАПАСА (не покупать) и захватывать
+        self.auto_defrog = bool(cfg.get("auto_defrog", False))
         # «два окна»: id сообщений, которые переиспользуем вместо переоткрытия меню
         self.list_id = None      # сообщение «Мои холопы» на странице холопа
         self.search_id = None    # сообщение поиска/результатов по нику
@@ -482,6 +493,99 @@ class Reroller:
             self.search_id = res.id
         return res
 
+    # ---------- РАЗЖАБ (снять охрану зельем жаб из запаса) ----------
+    async def wait_for_any(self, substrs, min_id=0, tries=8, delay=0.5):
+        """Как wait_for, но ждём сообщение, где встречается ЛЮБАЯ из подстрок."""
+        for _ in range(tries):
+            for m in await self.recent(12):
+                if m.out:
+                    continue
+                t = m.message or ""
+                if any(n in t for n in NOISE):
+                    continue
+                if m.id < min_id:
+                    continue
+                if any(s in t for s in substrs):
+                    return m
+            await asyncio.sleep(delay)
+        return None
+
+    def _potion_stock(self, msg):
+        """Запас зелий жаб из текста/кнопок экрана: «есть: N» → int, либо None если не нашли."""
+        hay = (msg.message or "") + " " + " ".join(t for _, _, t in self.flat_buttons(msg))
+        m = re.search(UI["potion_stock_re"], hay)
+        return int(m.group(1)) if m else None
+
+    def _find_potion_use_button(self, msg):
+        """Кнопка «применить зелье жаб ИЗ ЗАПАСА». НИКОГДА не берём покупку (⭐ / «Купить»)."""
+        for r, col, t in self.flat_buttons(msg):
+            low = t.lower()
+            if UI["star"] in t:                                  # платно — не жмём
+                continue
+            if any(b in low for b in UI["potion_buy_words"]):    # «Купить …» — не жмём
+                continue
+            if any(w in low for w in UI["potion_use_words"]):
+                return (r, col, t)
+        return None
+
+    async def defrog_capture(self, res, target, nick):
+        """Снять охрану зельем жаб ИЗ ЗАПАСА и захватить холопа в 10-сек окно.
+        Возвращает выпавшую профессию или None. Покупку зелья (⭐) НИКОГДА не жмём."""
+        r, col, t = target
+        log(f"  🧪 {nick} под охраной — пробую разжабить зельем из запаса (звёзды не трачу)")
+        if self.dry:
+            log(f"  [dry] разжаб: открыл бы «{t}», применил зелье жаб из запаса, захватил бы {nick}")
+            return None
+
+        # 1) открыть холопа под охраной
+        await self.click_pos(res, r, col, label=f"открываю (под охраной) {nick}", fast=True)
+        scr = await self.wait_for("", min_id=res.id, tries=10)
+        scr = await self.refetch(scr.id) if scr else None
+        if not scr:
+            log("  ⚠️ разжаб: не открылся экран холопа")
+            return None
+        txt = scr.message or ""
+
+        # 2) если охрана ещё стоит — применить зелье (из запаса)
+        if not any(w in txt for w in UI["defrog_done"]):
+            stock = self._potion_stock(scr)
+            if stock is not None and stock <= 0:
+                log("  ⛔ разжаб: зелье жаб кончилось (есть: 0) — НЕ покупаю (звёзды не трачу). Стоп.")
+                return None
+            btn = self._find_potion_use_button(scr)
+            if not btn:
+                allbtns = " | ".join(f"«{b}»" for _, _, b in self.flat_buttons(scr))
+                log(f"  ⚠️ разжаб: не нашёл кнопку «применить зелье из запаса». Кнопки экрана: {allbtns}")
+                return None
+            r2, col2, bt = btn
+            await self.click_pos(scr, r2, col2, label=f"зелье жаб (есть: {stock})", fast=True)
+            done = await self.wait_for_any(UI["defrog_done"], min_id=scr.id, tries=8)
+            scr = await self.refetch(done.id) if done else await self.refetch(scr.id)
+            if not scr:
+                return None
+            log(f"  🐸 охрана снята с {nick} — ловлю 10-сек окно на захват")
+
+        # 3) захватить в окно (кнопка «Захватить», не ⭐)
+        capture_btn = None
+        for r3, col3, bt in self.flat_buttons(scr):
+            if UI["btn_capture"] in bt and not self.has_star(bt):
+                capture_btn = (r3, col3, bt)
+                break
+        if not capture_btn:
+            allbtns = " | ".join(f"«{b}»" for _, _, b in self.flat_buttons(scr))
+            log(f"  ⚠️ разжаб: нет кнопки «Захватить» после снятия охраны. Кнопки: {allbtns}")
+            return None
+        r3, col3, bt = capture_btn
+        await self.click_pos(scr, r3, col3, label=f"Захватить {nick} (после разжаба)", fast=True)
+        cap = await self.wait_for(UI["captured_marker"], min_id=scr.id, tries=10)
+        if cap:
+            self.capture_id = cap.id
+            prof = parse_profession(cap.message or "")
+            log(f"  ✅ разжабил и захватил {nick} → {prof} {PROFESSIONS.get(prof, '')}")
+            return prof
+        log(f"  ⚠️ разжаб: захват {nick} не подтвердился (окно 10с могло закрыться)")
+        return None
+
     async def capture(self, nick, via_back=False):
         """Захватить nick за серебро. Вернуть ВЫПАВШУЮ ПРОФЕССИЮ (строку) или None.
 
@@ -494,15 +598,28 @@ class Reroller:
 
         # кнопка именно нашего ника (может быть обрезан «…»), свободного, за серебро (не ⭐)
         target = None
+        defrog_target = None   # цель под охраной, которую можно разжабить зельем
         for r, col, t in self.flat_buttons(res):
             if not result_name_matches(t, nick):
                 continue
             if not result_is_free(t):
-                log(f"  ⛔ {nick} недоступен бесплатно: «{t}» — пропускаю")
+                low = t.lower()
+                can_defrog = (UI["star"] not in t
+                              and any(w in low for w in UI["defroggable"]))
+                if can_defrog and defrog_target is None:
+                    defrog_target = (r, col, t)
+                    log(f"  ⛔ {nick} под охраной: «{t}» — попробую разжабить")
+                else:
+                    log(f"  ⛔ {nick} недоступен бесплатно: «{t}» — пропускаю")
                 continue
             target = (r, col, t)
             break
         if not target:
+            # под охраной + включён авто-разжаб → снять охрану зельем и захватить
+            if self.auto_defrog and defrog_target:
+                return await self.defrog_capture(res, defrog_target, nick)
+            if defrog_target and not self.auto_defrog:
+                log(f"  ℹ️ {nick} под охраной — включи «Авто-разжаб», чтобы снять зельем из запаса")
             log(f"  ⚠️ {nick} не найден среди свободных за серебро")
             return None
 
@@ -704,6 +821,8 @@ async def main():
     ap.add_argument("--prof", default=None, help="Целевая профессия (по умолчанию из конфига: Воин)")
     ap.add_argument("--dry-run", action="store_true", help="Не жать кнопки, только показать шаги")
     ap.add_argument("--check", action="store_true", help="Только показать профессию/охрану холопа, ничего не делать")
+    ap.add_argument("--auto-defrog", action="store_true",
+                    help="Снимать охрану зельем жаб ИЗ ЗАПАСА (не покупать) и захватывать")
     args = ap.parse_args()
 
     nicks = []
@@ -720,6 +839,8 @@ async def main():
     cfg = load_config()
     target = args.prof or cfg.get("target_profession", "Воин")
     dry = args.dry_run or bool(cfg.get("dry_run", False))
+    if args.auto_defrog:
+        cfg["auto_defrog"] = True   # флаг из панели/CLI → в конфиг Reroller
     if target not in PROF_KEYS:
         log(f"Неизвестная профессия «{target}». Доступно: {', '.join(PROF_KEYS)}")
         sys.exit(1)

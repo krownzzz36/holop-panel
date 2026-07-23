@@ -28,7 +28,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSION = "2026.07.23-1"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
+VERSION = "2026.07.23-2"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
 PY = sys.executable or "python3"
 PORT = int(os.environ.get("HOLOP_PORT", "8777"))
 
@@ -237,7 +237,9 @@ MODULES = [
         "desc": "Перегон холопа в нужную профессию (крутит выгнать→захватить).",
         "fields": [{"id": "nick", "label": "Ники холопов (по одному в строке)",
                     "kind": "textarea", "rows": 6, "placeholder": "Яр\nЖёлудь"}],
-        "selects": [{"id": "prof", "label": "Профессия", "options": PROFS, "default": "Воин"}],
+        "selects": [{"id": "prof", "label": "Профессия", "options": PROFS, "default": "Воин"},
+                    {"id": "auto_defrog", "label": "Авто-разжаб (снять охрану зельем жаб из запаса)",
+                     "options": ["Нет", "Да"], "default": "Нет"}],
         "actions": [{"id": "run", "label": "▶ Перегнать"},
                     {"id": "check", "label": "🔍 Проверить"},
                     {"id": "dry", "label": "Холостой (dry-run)"}],
@@ -533,6 +535,8 @@ def build_args(mid, action, fields):
         prof = (f.get("prof") or "Воин").strip()
         nicks = [x.strip() for x in (f.get("nick") or "").splitlines() if x.strip()]
         tail_args = ["--dry-run"] if action == "dry" else []
+        if (f.get("auto_defrog") or "Нет").strip() == "Да":
+            tail_args = tail_args + ["--auto-defrog"]   # снять охрану зельем из запаса
         if action == "check":
             nick = nicks[0] if nicks else ""
             return [nick, "--check"]
