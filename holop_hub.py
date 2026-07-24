@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import TimeoutError as FuturesTimeout
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-VERSION = "2026.07.23-5"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
+VERSION = "2026.07.24-1"   # видно в консоли и в шапке панели — чтобы понимать, свежая ли версия
 PY = sys.executable or "python3"
 PORT = int(os.environ.get("HOLOP_PORT", "8777"))
 
@@ -160,12 +161,20 @@ class Auth:
         self.phone_code_hash = None
         self.lock = threading.Lock()
 
-    def _run(self, coro):
+    def _run(self, coro, timeout=60):
+        """С ТАЙМАУТОМ: иначе подвисший Telethon держит HTTP-запрос вечно —
+        у пользователя «жму получить код и ничего не происходит» (жалоба Karina)."""
         import asyncio
         if self.loop is None or self.loop.is_closed():
             self.loop = asyncio.new_event_loop()
             threading.Thread(target=self.loop.run_forever, daemon=True).start()
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+        fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return fut.result(timeout)
+        except FuturesTimeout:
+            fut.cancel()
+            raise RuntimeError(
+                "Telegram не ответил за 60 секунд. Проверь интернет/VPN и попробуй ещё раз.")
 
     def send_code(self, phone):
         from telethon import TelegramClient
@@ -216,6 +225,18 @@ class Auth:
 
 
 AUTH = Auth()
+
+
+def _log_auth_error(e):
+    """Пишем сбои входа в auth_log.txt: у друзей «код не приходит» без деталей —
+    по этому файлу видно настоящую причину (FloodWait, сеть, api_id и т.д.)."""
+    import traceback
+    try:
+        with open(path("auth_log.txt"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  " +
+                    f"{type(e).__name__}: {e}\n" + traceback.format_exc() + "\n")
+    except OSError:
+        pass
 
 
 def _auth_err(e):
@@ -504,7 +525,8 @@ def save_donate(text):
 # ─────────────── настройки боя (smash_settings.json) ───────────────
 SMASH_SETTINGS_DEFAULTS = {"my_min_hp": 25, "my_recover_to": 50, "sec_per_hp": 60,
                            "regen_auto": False, "auto_kazna": False, "auto_defense": False,
-                           "pierce_defenses": True, "hit_shields": True, "bank_gold": False}
+                           "pierce_defenses": True, "hit_shields": True, "bank_gold": False,
+                           "auto_oboz": False}
 
 
 def load_smash_settings():
@@ -536,6 +558,7 @@ def save_smash_settings(body):
         out["pierce_defenses"] = bool(body.get("pierce_defenses", cur["pierce_defenses"]))
         out["hit_shields"] = bool(body.get("hit_shields", cur["hit_shields"]))
         out["bank_gold"] = bool(body.get("bank_gold", cur["bank_gold"]))
+        out["auto_oboz"] = bool(body.get("auto_oboz", cur["auto_oboz"]))
     except (TypeError, ValueError):
         return False
     try:
@@ -809,6 +832,7 @@ class H(BaseHTTPRequestHandler):
                     save_cfg(cfg)
                     return self._json({"ok": True})
             except Exception as e:
+                _log_auth_error(e)      # в auth_log.txt — чтобы прислать при проблемах входа
                 return self._json({"ok": False, "err": _auth_err(e)})
         if len(parts) == 3 and parts[0] == "api":
             mid, action = parts[1], parts[2]
@@ -970,6 +994,8 @@ function render(mid){
         <label style="display:flex;align-items:center;gap:7px;margin-top:6px;cursor:pointer">
           <input id="set_bank_gold" type="checkbox" style="width:auto"> 🪙 Класть в казну и золото (иначе — только серебро, золото свободно на оборону)</label>
         <label style="display:flex;align-items:center;gap:7px;margin-top:6px;cursor:pointer">
+          <input id="set_auto_oboz" type="checkbox" style="width:auto"> 🐴 Авто-обоз (+50% серебра с набегов — 400🏅 золота / 50 мин)</label>
+        <label style="display:flex;align-items:center;gap:7px;margin-top:6px;cursor:pointer">
           <input id="set_auto_defense" type="checkbox" style="width:auto"> 🛡️ Авто-оборона (ров + частокол активны + запас)</label>
         <label style="display:flex;align-items:center;gap:7px;margin-top:6px;cursor:pointer">
           <input id="set_pierce" type="checkbox" style="width:auto"> 🧱 Пробивать ров/частокол у целей (иначе — пропускать)</label>
@@ -1097,6 +1123,7 @@ async function loadSettings(){
     const pd=$('#set_pierce'); if(pd) pd.checked=(d.pierce_defenses!==false);
     const hs=$('#set_hit_shields'); if(hs) hs.checked=!!d.hit_shields;
     const bg=$('#set_bank_gold'); if(bg) bg.checked=!!d.bank_gold;
+    const ao=$('#set_auto_oboz'); if(ao) ao.checked=!!d.auto_oboz;
     if(c) c.disabled=!!(ra&&ra.checked);
   }catch(e){}
 }
@@ -1109,7 +1136,8 @@ async function saveSettings(){
     auto_defense:!!($('#set_auto_defense')||{}).checked,
     pierce_defenses:!!($('#set_pierce')||{}).checked,
     hit_shields:!!($('#set_hit_shields')||{}).checked,
-    bank_gold:!!($('#set_bank_gold')||{}).checked};
+    bank_gold:!!($('#set_bank_gold')||{}).checked,
+    auto_oboz:!!($('#set_auto_oboz')||{}).checked};
   try{ const r=await fetch('/api/raids/settings',{method:'POST',body:JSON.stringify(body)});
     const d=await r.json(); const n=$('#snote');
     if(n){ n.textContent=d.ok?'✅ настройки сохранены — применятся в ближайший цикл':'ошибка сохранения';
@@ -1199,8 +1227,13 @@ const $=s=>document.getElementById(s);
 function show(id){['step-phone','step-code','step-pass'].forEach(x=>$(x).classList.toggle('hide',x!==id));}
 function note(t,cls){const n=$('note');n.textContent=t||'';n.className='note'+(cls?' '+cls:'');}
 async function api(path,data){
-  const r=await fetch('/api/auth/'+path,{method:'POST',body:JSON.stringify(data||{})});
-  return r.json();
+  try{
+    const r=await fetch('/api/auth/'+path,{method:'POST',body:JSON.stringify(data||{})});
+    return await r.json();
+  }catch(e){
+    // сервер не ответил / вернул не-JSON — иначе кнопка залипала без объяснений
+    return {ok:false, err:'Панель не ответила. Проверь, что окно пульта не закрыто, и попробуй ещё раз.'};
+  }
 }
 async function sendCode(){
   const phone=$('phone').value.trim();

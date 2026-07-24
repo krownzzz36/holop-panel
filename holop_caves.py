@@ -399,6 +399,11 @@ async def run(cfg, args):
         session = os.path.join(HERE, cfg.get("session_name", "holop_session"))
         client = TelegramClient(session, int(cfg["api_id"]), cfg["api_hash"])
     await client.start()
+    # 🔒 доступ только участникам закрытой группы (анти-кража)
+    from access import enforce_access
+    if not await enforce_access(client, print):
+        await client.disconnect()
+        return
     bot = cfg.get("bot_username", "holop")
     try:
         if args.clear_reminders:

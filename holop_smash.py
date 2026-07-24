@@ -123,6 +123,14 @@ STAR = "⭐"
 # ── бочка/динамит (тексты сняты из истории 13.07.2026) ──
 MINED_MARKER = "ЗАМИНИРОВАНА"                 # «⚠️ ТВОЯ ТЕРРИТОРИЯ ЗАМИНИРОВАНА!»
 BOMB_WARN = "скоро взорвётся"                 # поздний пуш «Бочка ... скоро взорвётся»
+ATTACK_MARKER = "НА ТЕБЯ НАПАЛИ"              # пуш о набеге на меня → ров/частокол могли сгореть
+
+
+async def rsleep(base, spread=0.35):
+    """Пауза с рандомом ±spread (деф ±35%). Антипалево: ровные машинные интервалы —
+    первое, что видно со стороны игры. Везде, где раньше был фиксированный sleep."""
+    lo, hi = base * (1.0 - spread), base * (1.0 + spread)
+    await asyncio.sleep(random.uniform(max(0.05, lo), hi))
 DEFUSED_WORDS = ("обезврежена", "в безопасности", "правильный фитиль")
 EXPLODED_WORDS = ("взорвал", "взрыв", "неправильн", "не тот фитиль", "уничтож", "разрушен",
                   "территория взорвана")
@@ -227,6 +235,13 @@ def parse_shop_gold(text):
 
 
 # предметы обороны: держим активными + запас (покупка за золото 🏅, не за ⭐)
+# 🐴 ОБОЗ — +% серебра с набегов на время. Берём «+50% · 50м — 400».
+# ВНИМАНИЕ: на кнопке нарисовано серебро 🪙, но игра списывает ЗОЛОТО 🏅 (баг игры,
+# проверено вживую). Поэтому баланс проверяем и добираем ЗОЛОТОМ.
+OBOZ_PICK = ("+50%", "50м")      # кнопку ищем по ОБЕИМ подстрокам
+OBOZ_COST = 400                  # 🏅 ЗОЛОТА (не серебра, несмотря на иконку)
+OBOZ_MINUTES = 50                # сколько живёт
+
 DEFENSE_ITEMS = [
     {"name": "Частокол", "price": 350, "reserve": 2},   # блок 3 набегов / 24ч
     {"name": "Ров", "price": 100, "reserve": 2},          # блок 1 набег
@@ -375,6 +390,7 @@ class Smasher:
         self.donate_path = os.path.join(HERE, "smash_donate.txt")   # цели с донат-защитой (Купол/Стена) — не бьём
         self.targets_path = os.path.join(HERE, "smash_targets.txt")  # редактируемый список целей
         self.settings_path = os.path.join(HERE, "smash_settings.json")  # живые настройки из панели
+        self.oboz_path = os.path.join(HERE, "oboz_state.json")  # когда истекает обоз (без лишних запросов)
         self.apply_live_settings()   # подхватить настройки из панели на старте
         self._default_targets = list(cfg.get("smash_targets") or TARGETS)
         self.targets = self.load_targets()
@@ -399,6 +415,10 @@ class Smasher:
         self._next_bank = 0.0         # когда следующий раз по таймеру (раз в ~час)
         self._auto_defense = False    # авто-оборона: ров+частокол активны + запас
         self._next_defense = 0.0      # когда следующий раз проверять оборону
+        self._last_attack_id = 0      # id последнего замеченного пуша «НА ТЕБЯ НАПАЛИ»
+        self._auto_oboz = False       # авто-покупка обоза (+50% серебра с набегов)
+        self._oboz_until = 0.0        # до какого времени действует обоз (из oboz_state.json)
+        self._heal_sample = None      # (время, HP) — для замера фактического регена
         self._last_hit_name = None    # последняя обработанная цель — продолжить список отсюда
         self._pierce_defenses = True  # пробивать ров/частокол (True) или пропускать (False)
         self._hit_shields = True      # сносить донат-щит требушетом и фармить дальше (True) или беречь требушеты и скипать (False)
@@ -450,6 +470,7 @@ class Smasher:
         self._auto_defense = bool(data.get("auto_defense", getattr(self, "_auto_defense", False)))
         self._pierce_defenses = bool(data.get("pierce_defenses", getattr(self, "_pierce_defenses", True)))
         self._hit_shields = bool(data.get("hit_shields", getattr(self, "_hit_shields", True)))
+        self._auto_oboz = bool(data.get("auto_oboz", getattr(self, "_auto_oboz", False)))
 
     def ensure_targets_file(self):
         """Если файла целей нет — создать с текущим списком (чтобы панель могла его показать)."""
@@ -664,7 +685,7 @@ class Smasher:
             if not self._paused_note:
                 log("⏸  ПАУЗА — жду 'run' в пульте (smash_control.txt).")
                 self._paused_note = True
-            await asyncio.sleep(3)
+            await rsleep(3)
 
     async def sleep_gated(self, seconds):
         """Спать, но просыпаться рано, если пульт переключили (pause/stop). Вернуть состояние."""
@@ -687,7 +708,7 @@ class Smasher:
                 t = m.message or ""
                 if ARENA_MARKER in t and "Жизни:" in t:
                     return m
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
 
     async def my_current_hp(self):
@@ -700,7 +721,7 @@ class Smasher:
                 t = m.message or ""
                 if "ТЕРРИТОРИЯ" in t and ("Здоровье" in t or "Жизни" in t):
                     return parse_my_low_hp(t)
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
 
     async def open_territory(self):
@@ -712,8 +733,29 @@ class Smasher:
                     continue
                 if "ТЕРРИТОРИЯ" in (m.message or ""):
                     return m
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
+
+    def _note_heal_sample(self, hp):
+        """Замер РЕАЛЬНОГО регена по двум соседним чтениям HP → уточняем min_per_hp.
+        Нужен потому, что бонусы регена с главной могут не распарситься (или измениться),
+        и бот тогда спит лишнее. Факт всегда важнее расчёта."""
+        now = time.time()
+        prev = getattr(self, "_heal_sample", None)
+        self._heal_sample = (now, hp)
+        if not prev:
+            return
+        dt_min = (now - prev[0]) / 60.0
+        dhp = hp - prev[1]
+        if dhp <= 0 or dt_min < 0.5:
+            return                                  # шум/откат HP — не учитываем
+        measured = dt_min / dhp                     # минут на 1 HP ПО ФАКТУ
+        if not (0.05 <= measured <= 10.0):
+            return                                  # мусор
+        old = float(self.s["min_per_hp"])
+        self.s["min_per_hp"] = old * 0.7 + measured * 0.3   # сглаживаем, чтоб не дёргаться
+        log(f"  📐 замер регена: по факту ~{measured*60:.0f} с/HP (считал ~{old*60:.0f}) "
+            f"→ уточнил до ~{self.s['min_per_hp']*60:.0f} с/HP")
 
     async def update_regen_from_main(self):
         """Авто-реген: посчитать сек/HP по бонусам с главной и записать в min_per_hp."""
@@ -734,12 +776,12 @@ class Smasher:
         terr = await self.open_territory()
         if terr:
             await self.click_text(terr, "Собрать", label="Собрать доход (серебро)")
-            await asyncio.sleep(1.0)
+            await rsleep(1.0)
         await self.send("Холопы")
         hol = await self.wait_text("Холопы")
         if hol:
             await self.click_text(hol, "Собрать", label="Собрать золото")
-            await asyncio.sleep(1.0)
+            await rsleep(1.0)
         await self._bank_currency("Серебро")
         if getattr(self, "_bank_gold", False):
             await self._bank_currency("Золото")   # только если включена галочка «класть золото в казну»
@@ -768,11 +810,11 @@ class Smasher:
             if sub:
                 if not await self.click_text(sub, "Положить всё", label="Положить всё"):
                     await self.click_text(sub, "Назад", label="Назад")
-                await asyncio.sleep(1.0)
+                await rsleep(1.0)
         dep2 = await self.wait_text("ДЕПОЗИТ")
         if dep2:
             await self.click_text(dep2, "Реинвест", label=f"Реинвест {kind}")
-            await asyncio.sleep(0.8)
+            await rsleep(0.8)
 
     # ---------- АВТО-ОБОРОНА (ров + частокол: держать активными + запас) ----------
     async def _collect_holop_gold(self):
@@ -781,7 +823,7 @@ class Smasher:
         hol = await self.wait_text("Холопы")
         if hol:
             await self.click_text(hol, "Собрать", label="Собрать золото")
-            await asyncio.sleep(1.0)
+            await rsleep(1.0)
 
     async def _reopen_defense(self):
         """Магазин → Средства обороны, вернуть сообщение экрана обороны."""
@@ -816,7 +858,7 @@ class Smasher:
         while stock < reserve and buy_btn and guard < 6:
             prev = stock
             await self.click(dmsg, buy_btn[0], buy_btn[1], label=f"Купить {name}")
-            await asyncio.sleep(0.9)
+            await rsleep(0.9)
             dmsg = await self.wait_text("Средства обороны") or dmsg
             active, stock, act_btn, buy_btn = self._defense_state(dmsg, name)
             guard += 1
@@ -832,14 +874,114 @@ class Smasher:
                 break
         if not active and act_btn and stock > 0:
             await self.click(dmsg, act_btn[0], act_btn[1], label=f"Активировать {name}")
-            await asyncio.sleep(0.8)
-            dmsg = await self.wait_text("Средства обороны") or dmsg
-            log(f"  🛡️ {name}: активирован (запас теперь ~{max(0, stock - 1)})")
+            await asyncio.sleep(random.uniform(0.7, 1.4))
+            # ВАЖНО: игра отвечает АЛЕРТОМ, сообщение само не меняется — перечитываем экран
+            # и ПРОВЕРЯЕМ, что появился ⏱️. Раньше бот писал «активирован» вслепую.
+            dmsg = await self._reopen_defense() or dmsg
+            now_active, now_stock, _, _ = self._defense_state(dmsg, name)
+            if now_active:
+                log(f"  🛡️ {name}: АКТИВИРОВАН ✔ (запас {now_stock})")
+            else:
+                log(f"  ⚠️ {name}: активация НЕ подтвердилась (запас {now_stock}) — повторю в след. заход")
         elif active:
             log(f"  ✅ {name}: уже активен, запас {stock}")
         elif not act_btn:
             log(f"  ⚠️ {name}: нет запаса и не смог купить")
         return dmsg
+
+    # ---------- 🐴 АВТО-ОБОЗ (+50% серебра с набегов на 50 мин) ----------
+    def _load_oboz_until(self):
+        """До какого времени действует купленный обоз. Держим в ЛОКАЛЬНОМ файле,
+        чтобы НЕ лазить в магазин каждый проход (просьба Максима — меньше запросов)."""
+        try:
+            with open(self.oboz_path, encoding="utf-8") as f:
+                return float(json.load(f).get("until", 0))
+        except (OSError, ValueError, TypeError):
+            return 0.0
+
+    def _save_oboz_until(self, until):
+        try:
+            with open(self.oboz_path, "w", encoding="utf-8") as f:
+                json.dump({"until": until}, f)
+        except OSError:
+            pass
+
+    async def _ensure_gold(self, need):
+        """Добрать ЗОЛОТА до need: сначала собрать с холопов, потом — снять из казны.
+        ВАЖНО: на кнопке обоза нарисовано серебро 🪙, но игра списывает ЗОЛОТО 🏅
+        (баг игры — проверено Владимиром вживую). Поэтому считаем именно золото."""
+        gold, _ = await self.my_balance()
+        if gold >= need:
+            return gold
+        await self._collect_holop_gold()
+        gold, _ = await self.my_balance()
+        if gold >= need:
+            return gold
+        log(f"  🏦 обоз: золота {gold} < {need} — снимаю из казны")
+        try:
+            await self.kazna_withdraw("gold", need - gold + 100)
+        except Exception as e:
+            log(f"  ⚠️ обоз: не снял золото из казны: {type(e).__name__}: {e}")
+        gold, _ = await self.my_balance()
+        return gold
+
+    async def ensure_oboz(self):
+        """Купить обоз «+50% · 50м», если прошлый истёк. Только за серебро 🪙 — ⭐ никогда."""
+        if time.time() < self._oboz_until:
+            return                                   # ещё действует — в игру не лезем
+        log("🐴 Авто-обоз: прошлый истёк — беру новый (+50% на 50 мин)")
+        gold = await self._ensure_gold(OBOZ_COST)
+        if gold < OBOZ_COST:
+            log(f"  ⛔ обоз: не хватает золота ({gold} < {OBOZ_COST}🏅) — пропускаю, повторю позже")
+            self._oboz_until = time.time() + 600 + random.uniform(-120, 120)
+            return
+        await self.send("Магазин")
+        shop = await self.wait_text("Магазин")
+        if not shop or not await self.click_text(shop, "Расходуемые", label="Расходуемые ресурсы"):
+            log("  ⚠️ обоз: не открыл «Расходуемые ресурсы»")
+            self._oboz_until = time.time() + 600
+            return
+        con = await self.wait_text("Обоз") or shop
+        if not await self.click_text(con, "Обоз", label="Обоз"):
+            log("  ⚠️ обоз: не нашёл кнопку «Обоз»")
+            self._oboz_until = time.time() + 600
+            return
+        await rsleep(1.0)
+        scr = await self.refetch(con.id) or con
+        a, b = OBOZ_PICK
+        for r, c, t in self.flat_buttons(scr):
+            if a in (t or "") and b in (t or ""):
+                if STAR in (t or ""):
+                    log(f"  ⛔ обоз за звёзды «{t}» — не беру")
+                    self._oboz_until = time.time() + 900
+                    return
+                await self.click(scr, r, c, label=f"Купить обоз «{t}»")
+                self._oboz_until = time.time() + OBOZ_MINUTES * 60 - 60
+                self._save_oboz_until(self._oboz_until)
+                log(f"  🐴 куплен обоз «{t}» — действует ~{OBOZ_MINUTES} мин")
+                return
+        log("  ⚠️ обоз: не нашёл вариант «+50% · 50м»")
+        self._oboz_until = time.time() + 900
+
+    async def check_attacked(self):
+        """Заметить пуш «НА ТЕБЯ НАПАЛИ» → сразу перепроверить оборону.
+        Ров/частокол — расходники (1 и 3 набега), после атаки часто уже сгорели.
+        Событийно = без лишних опросов магазина."""
+        if not self._auto_defense:
+            return
+        try:
+            msgs = await self.recent(6)
+        except Exception:
+            return
+        for m in msgs:
+            if m.out or m.id <= self._last_attack_id:
+                continue
+            if ATTACK_MARKER in (m.message or ""):
+                self._last_attack_id = m.id
+                if self._next_defense > time.time():
+                    self._next_defense = time.time()   # проверить оборону немедленно
+                    log("⚔️ Заметил набег на меня — сразу перепроверю ров/частокол")
+                return
 
     async def ensure_defenses(self):
         """Держать ров и частокол активными + запас. Нет золота — снять с холопов."""
@@ -847,11 +989,13 @@ class Smasher:
         dmsg = await self._reopen_defense()
         if not dmsg:
             log("  ⚠️ не открыл «Средства обороны»")
-            self._next_defense = time.time() + 1200
+            self._next_defense = time.time() + 1200 + random.uniform(-240, 240)
             return
         for item in DEFENSE_ITEMS:
             dmsg = await self._ensure_one_defense(dmsg, item) or dmsg
-        self._next_defense = time.time() + 1200 + random.uniform(-300, 300)   # раз в ~20 мин ± 5
+        # ров блокирует 1 набег, частокол — 3, сгорают быстро → проверяем чаще, чем раньше.
+        # Плюс мгновенная перепроверка по пушу «НА ТЕБЯ НАПАЛИ» (см. check_attacked).
+        self._next_defense = time.time() + 600 + random.uniform(-180, 180)   # ~10 мин ± 3
         log("🛡️ Авто-оборона: готово.")
 
     async def press_search(self):
@@ -886,7 +1030,7 @@ class Smasher:
                 t = m.message or ""
                 if ARENA_MARKER in t and "Поиск:" in t and want in norm(t):
                     return m
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
 
     # ---------- профиль цели (для таймера щита) ----------
@@ -903,7 +1047,7 @@ class Smasher:
                     break
             if terr:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not terr or not await self.click_text(terr, "Найти", label="Найти"):
             return None
         await self.wait_text(FIND_PROMPT, tries=8)
@@ -919,7 +1063,7 @@ class Smasher:
                     break
             if lst:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not lst:
             return None
         # строгое совпадение имени среди кнопок списка
@@ -936,7 +1080,7 @@ class Smasher:
             t = m.message or ""
             if "Статус" in t or "БОЕВАЯ СТАТИСТИКА" in t:
                 return parse_shield_seconds(t)
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
 
     # ---------- удар ----------
@@ -994,12 +1138,12 @@ class Smasher:
                     break
             if result:
                 break
-            await asyncio.sleep(0.6)
+            await rsleep(0.6)
         if not result:
             # Молчаливый ответ (частокол/ров): само сообщение не меняется. Проверяем
             # по земле — свежий поиск покажет, ушла ли цель в КД (значит удар прошёл).
             try:
-                await asyncio.sleep(1.0)
+                await rsleep(1.0)
                 verify = await self.arena_search(name)
                 if verify:
                     vpos = target_positions(self.flat_buttons(verify))
@@ -1173,7 +1317,7 @@ class Smasher:
                 has_ognivo = any("огниво" in (bt or "").lower() for _, _, bt in self.flat_buttons(m))
                 if has_ognivo or MINED_MARKER in t or "ДРУЖИН" in t.upper() or "оружие" in t.lower():
                     return m
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return None
 
     def _is_mined(self, dr):
@@ -1205,7 +1349,7 @@ class Smasher:
                     sv = re.search(r"Серебро:\s*([^\n]+)", t)
                     return (parse_amount(g.group(1)) if g else 0,
                             parse_amount(sv.group(1)) if sv else 0)
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         return (0, 0)
 
     async def kazna_withdraw(self, kind, amount):
@@ -1222,7 +1366,7 @@ class Smasher:
                     break
             if km:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not km or not await self.click_text(km, section, label=section):
             log(f"  ⚠️ казна: не открыл раздел {section}")
             return False
@@ -1232,7 +1376,7 @@ class Smasher:
                 for m in sorted(await self.recent(6), key=lambda x: x.id, reverse=True):
                     if not m.out and pred(m):
                         return m
-                await asyncio.sleep(0.5)
+                await rsleep(0.5)
             return None
 
         dep = await _find(lambda m: any((bt or "").strip().lower() == "снять"
@@ -1245,9 +1389,9 @@ class Smasher:
         if not amt or not await self.click_text(amt, "Ввести сумму", label="Ввести сумму"):
             log("  ⚠️ казна: нет кнопки «Ввести сумму»")
             return False
-        await asyncio.sleep(0.6)
+        await rsleep(0.6)
         await self.send(str(amount))
-        await asyncio.sleep(1.2)
+        await rsleep(1.2)
         log(f"  🏦 Запрошено снятие {amount} {section}")
         return True
 
@@ -1364,7 +1508,7 @@ class Smasher:
                 sp["gold"] += cost
                 self.stats["spent_gold"] += cost
                 log(f"  🛒 Куплено Огниво за {cost}🏅")
-                await asyncio.sleep(0.8)
+                await rsleep(0.8)
                 return True
         log("  ⚠️ не нашёл кнопку покупки «Огниво 900🏅»")
         return False
@@ -1380,7 +1524,7 @@ class Smasher:
                 if any(w in low for w in EXPLODED_WORDS):
                     log("  📋 сырой ответ (взрыв): " + " ".join((m.message or "").split())[:200])
                     return "exploded"
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         dr = await self.open_druzhina()
         if dr and MINED_MARKER not in (dr.message or ""):
             return "defused"      # мины больше нет и явного взрыва не видели → считаем обезврежено
@@ -1400,7 +1544,7 @@ class Smasher:
             log("  ⚠️ нет кнопки «Огниво xN». Сырые кнопки: "
                 + " | ".join(bt for _, _, bt in self.flat_buttons(dr)))
             return "no_use_button"
-        await asyncio.sleep(0.9)
+        await rsleep(0.9)
         fuse = None
         for _ in range(12):
             for m in sorted(await self.recent(6), key=lambda x: x.id, reverse=True):
@@ -1416,7 +1560,7 @@ class Smasher:
                     break
             if fuse:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not fuse:
             return await self._read_defuse_result()   # вдруг сразу результат
         log("  🎲 экран фитиля, кнопки: " + " | ".join(bt for _, _, bt in self.flat_buttons(fuse)))
@@ -1437,7 +1581,7 @@ class Smasher:
                     break
         if not clicked:
             return "no_fuse_button"
-        await asyncio.sleep(1.0)
+        await rsleep(1.0)
         return await self._read_defuse_result()
 
     async def recover_after_explosion(self, sp):
@@ -1461,7 +1605,7 @@ class Smasher:
                     break
             if tmsg:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not tmsg:
             log("  ⚠️ территория не открылась для лечения")
             return
@@ -1492,11 +1636,11 @@ class Smasher:
                     break
             if hub:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not hub or not await self.click_text(hub, "Холопы (", label="список холопов"):
             log("  ⚠️ не открыл список холопов для защиты")
             return
-        await asyncio.sleep(0.8)
+        await rsleep(0.8)
         lst = None
         for _ in range(12):
             for m in sorted(await self.recent(6), key=lambda x: x.id, reverse=True):
@@ -1505,7 +1649,7 @@ class Smasher:
                     break
             if lst:
                 break
-            await asyncio.sleep(0.5)
+            await rsleep(0.5)
         if not lst:
             log("  ⚠️ список холопов не открылся")
             return
@@ -1542,6 +1686,22 @@ class Smasher:
             f"🪙 награблено {st['loot']:,}, 📈 репутация +{st['rep']:.0f}".replace(",", " ")
             + (f", 💣 бочек {st['bombs']} (разминир. {st['defused']}, взрывов {st['exploded']})"
                if st['bombs'] else ""))
+
+    def interim_report(self, why=""):
+        """Промежуточный отчёт — те же цифры, что в итоговом, но по ходу дела
+        (напр. при уходе на лечение). Чтобы видеть прогресс, не дожидаясь остановки."""
+        st = self.stats
+        dur = time.time() - self._started if self._started else 0
+        log("──────── ПРОМЕЖУТОЧНЫЙ ОТЧЁТ ────────" + (f"  ({why})" if why else ""))
+        log(f"  ⏱️ Длительность: {fmt_secs(dur)}")
+        log(f"  ⚔️ Ударов: {st['hits']}  |  🏆 Побед: {st['wins']}  |  "
+            f"🧱 Пробивал: {st['blocked']}  |  ❌ Поражений: {st['loss']}")
+        log(f"  🪙 Награблено серебра: {st['loot']:,}".replace(",", " "))
+        log(f"  📈 Репутация заработана: +{st['rep']:.1f}")
+        if st.get("bombs"):
+            log(f"  💣 Бочек: {st['bombs']}  |  🔧 Разминировано: {st['defused']}  |  "
+                f"💥 Взрывов: {st['exploded']}")
+        log("──────────────────────────────────────")
 
     def report(self):
         """Итоговый общий отчёт (пишется при остановке)."""
@@ -1605,6 +1765,10 @@ class Smasher:
         self._last_bank = time.time()
         self._next_bank = time.time() + 3600 + random.uniform(-600, 600)
         self._next_defense = time.time() + 60 + random.uniform(0, 120)   # первую оборону — скоро
+        self._oboz_until = self._load_oboz_until()   # обоз мог остаться живым с прошлого запуска
+        if self._auto_oboz:
+            left = max(0, self._oboz_until - time.time())
+            log(f"🐴 Авто-обоз ВКЛ — {'действует ещё ' + fmt_secs(left) if left else 'куплю в ближайшем проходе'}")
         if self._auto_kazna:
             log(f"🏦 Авто-казна ВКЛ — первый сбор примерно через {(self._next_bank-time.time())/60:.0f} мин, "
                 "плюс при уходе на лечение.")
@@ -1620,9 +1784,8 @@ class Smasher:
                 if _is_dead_session(e):
                     log("🛑 СЕССИЯ БОЛЬШЕ НЕ РАБОТАЕТ — Telegram отозвал ключ (сессия "
                         "использована с ДВУХ IP сразу). Причины: (1) VPN меняет страну/IP "
-                        "на ходу — зафиксируй ОДНУ страну без переключений; (2) бот запущен "
-                        "дважды — оставь одно окно. Надо ВОЙТИ ЗАНОВО: жми «Сменить аккаунт» "
-                        "в шапке пульта (или удали config.json) и авторизуйся. Останавливаюсь.")
+                        "на ходу — зафиксируй ОДНУ страну; (2) бот запущен дважды. "
+                        "Надо войти заново (переавторизоваться). Останавливаюсь.")
                     break
                 log(f"  ⚠️ сбой в цикле: {type(e).__name__}: {e} — продолжаю через 15с")
                 try:
@@ -1654,8 +1817,19 @@ class Smasher:
                 if _is_dead_session(e):
                     raise
                 log(f"  ⚠️ авто-казна (таймер) сбой: {type(e).__name__}: {e}")
-                self._next_bank = time.time() + 1800   # повтор через 30 мин при сбое
+                self._next_bank = time.time() + 1800 + random.uniform(-300, 300)   # ~30 мин ± 5 при сбое
             return None
+        # ⚔️ если на меня напали — оборона могла сгореть, проверим немедленно
+        await self.check_attacked()
+        # 🐴 АВТО-ОБОЗ (+50% серебра с набегов). Сверяется с локальным файлом — без лишних запросов
+        if self._auto_oboz:
+            try:
+                await self.ensure_oboz()
+            except Exception as e:
+                if _is_dead_session(e):
+                    raise
+                log(f"  ⚠️ авто-обоз сбой: {type(e).__name__}: {e}")
+                self._oboz_until = time.time() + 600
         # 🛡️ АВТО-ОБОРОНА по таймеру (ров/частокол активны + запас)
         if self._auto_defense and self._next_defense and time.time() >= self._next_defense:
             try:
@@ -1664,7 +1838,7 @@ class Smasher:
                 if _is_dead_session(e):
                     raise
                 log(f"  ⚠️ авто-оборона сбой: {type(e).__name__}: {e}")
-                self._next_defense = time.time() + 900   # повтор через 15 мин при сбое
+                self._next_defense = time.time() + 900 + random.uniform(-180, 180)   # ~15 мин ± 3 при сбое
             return None
         # РЕЖИМ ЛЕЧЕНИЯ: не атакуем, но КАЖДЫЙ РАЗ читаем реальное HP (Территория).
         # Просыпаемся сразу, как только HP дорос до recover_to (в т.ч. после эликсира).
@@ -1673,16 +1847,24 @@ class Smasher:
             cap = (s["my_recover_to"] * s["min_per_hp"] * 60) + 600   # аварийный потолок сна
             if hp is not None and hp >= s["my_recover_to"]:
                 self._healing = False
+                self._heal_sample = None
                 log(f"❤️ HP восстановлено ({hp}) — продолжаю набеги.")
             elif time.time() - self._heal_start > cap:
                 self._healing = False
+                self._heal_sample = None
                 log("❤️ Потолок лечения истёк — пробую продолжить (проверю HP в бою).")
             else:
+                # ЗАМЕР ФАКТИЧЕСКОГО регена по двум чтениям HP — чтобы не спать лишнего,
+                # если реально лечишься быстрее расчётного (бонусы реге на могут не распарситься).
+                if hp is not None:
+                    self._note_heal_sample(hp)
                 rem = max(1.0, (s["my_recover_to"] - (hp or 0)) * s["min_per_hp"])
                 shown = str(hp) if hp is not None else "?"
-                # спим ДО почти-цели (реже читаем HP — не палимся). Не чаще 1/мин, не реже 1/15мин.
-                nap = max(60.0, min(rem * 60.0 * 0.9 + random.uniform(-15, 15), 900.0))
-                log(f"🩶 Лечусь: HP {shown}, до {s['my_recover_to']} ~{rem:.0f}м — перечитаю через {nap:.0f}с")
+                # спим до почти-цели, но перечитываем заметно чаще (потолок 4 мин) и с рандомом
+                nap = rem * 60.0 * 0.85 * random.uniform(0.85, 1.15)
+                nap = max(45.0, min(nap, 240.0))
+                log(f"🩶 Лечусь: HP {shown}, до {s['my_recover_to']} ~{rem:.0f}м "
+                    f"(~{s['min_per_hp']*60:.0f} с/HP) — перечитаю через {nap:.0f}с")
                 return await self.sleep_gated(nap)
         arena = await self.open_arena()
         if not arena:
@@ -1695,6 +1877,7 @@ class Smasher:
             self._healing = True
             self._heal_start = time.time()
             log(f"🩸 Мои HP {my_hp} ≤ {s['my_min_hp']} — ухожу на лечение до {s['my_recover_to']}.")
+            self.interim_report("ушёл на лечение")   # промежуточный итог по ходу дела
             # 🏦 раз уж не бьём и регенимся — заодно собираем казну (но не чаще раза в 10 мин)
             if self._auto_kazna and time.time() - self._last_bank >= 600:
                 try:
@@ -1807,6 +1990,11 @@ async def main():
         session = os.path.join(HERE, cfg.get("session_name", "holop_session"))
         client = TelegramClient(session, int(cfg["api_id"]), cfg["api_hash"])
     await client.start()
+    # 🔒 доступ только участникам закрытой группы (анти-кража)
+    from access import enforce_access
+    if not await enforce_access(client, log):
+        await client.disconnect()
+        return
     me = await client.get_me()
     mode = "SELFTEST" if args.selftest else ("DRY-RUN" if args.dry_run else "БОЕВОЙ")
     log(f"[{datetime.now():%H:%M:%S}] Вошёл как {me.first_name}. Режим: {mode}")

@@ -881,6 +881,11 @@ async def main():
         session = os.path.join(HERE, cfg.get("session_name", "holop_session"))
         client = TelegramClient(session, int(cfg["api_id"]), cfg["api_hash"])
     await client.start()
+    # 🔒 доступ только участникам закрытой группы (анти-кража)
+    from access import enforce_access
+    if not await enforce_access(client, log):
+        await client.disconnect()
+        return
     me = await client.get_me()
     log(f"Вошёл как: {me.first_name} (@{me.username}).  Цель: {', '.join(nicks)} → {target}")
 

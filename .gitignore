@@ -23,3 +23,4 @@ nicks.txt
 __pycache__/
 *.pyc
 .DS_Store
+auth_log.txt
